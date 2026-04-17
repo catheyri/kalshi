@@ -41,12 +41,26 @@ type HistoryState = {
   future: ViewState[];
 };
 
-type Market = {
-  id: string;
-  label: string;
-  bid: number;
-  ask: number;
-  volume: number;
+type ApiMarket = {
+  ticker: string;
+  title?: string;
+  subtitle?: string;
+  status?: string;
+  yes_sub_title?: string;
+  yes_bid_dollars?: string;
+  yes_ask_dollars?: string;
+  volume_fp?: string;
+  rules_primary?: string;
+};
+
+type ApiEvent = {
+  event_ticker: string;
+  series_ticker: string;
+  title: string;
+  sub_title?: string;
+  category?: string;
+  strike_date?: string;
+  markets?: ApiMarket[];
 };
 
 type EventRecord = {
@@ -56,24 +70,33 @@ type EventRecord = {
   title: string;
   startTime: string;
   isLive: boolean;
-  markets: Market[];
+  markets: MarketRecord[];
+};
+
+type MarketRecord = {
+  id: string;
+  label: string;
+  bid: number;
+  ask: number;
+  volume: number;
+  rulesPrimary: string;
 };
 
 type FlatRow = {
-  kind: "market";
   id: string;
   eventId: string;
   category: string;
   subcategory: string;
-  marketName: string;
   eventTitle: string;
   displayName: string;
+  marketLabel: string;
   startTime: string;
   isLive: boolean;
   bid: number;
   ask: number;
   volume: number;
   spread: number;
+  rulesPrimary: string;
 };
 
 type EventGroup = {
@@ -89,84 +112,9 @@ type EventGroup = {
   summaryAsk: number | null;
   sortBid: number;
   sortAsk: number;
-  spread: number;
 };
 
-const MOCK_EVENTS: EventRecord[] = [
-  {
-    id: "evt-trump-words",
-    category: "Politics",
-    subcategory: "Elections",
-    title: "What will Trump say today?",
-    startTime: "2026-04-17T09:00:00-07:00",
-    isLive: true,
-    markets: [
-      { id: "iran", label: "Iran", bid: 43, ask: 47, volume: 184000 },
-      { id: "oil", label: "Oil", bid: 38, ask: 42, volume: 129000 },
-      { id: "tariffs", label: "Tariffs", bid: 56, ask: 60, volume: 205000 },
-    ],
-  },
-  {
-    id: "evt-senate-control",
-    category: "Politics",
-    subcategory: "Senate",
-    title: "Which party will control the Senate after the election?",
-    startTime: "2026-11-03T17:00:00-08:00",
-    isLive: false,
-    markets: [
-      { id: "democrats", label: "Democrats", bid: 49, ask: 52, volume: 912000 },
-      { id: "republicans", label: "Republicans", bid: 48, ask: 51, volume: 887000 },
-    ],
-  },
-  {
-    id: "evt-fomc-cuts",
-    category: "Economics",
-    subcategory: "Fed",
-    title: "Will the Fed cut rates at the next meeting?",
-    startTime: "2026-06-17T11:00:00-07:00",
-    isLive: false,
-    markets: [{ id: "yes", label: "Yes", bid: 31, ask: 34, volume: 275000 }],
-  },
-  {
-    id: "evt-lakers-playoffs",
-    category: "Sports",
-    subcategory: "NBA",
-    title: "Will the Lakers make the playoffs?",
-    startTime: "2026-04-24T19:30:00-07:00",
-    isLive: true,
-    markets: [{ id: "yes", label: "Yes", bid: 67, ask: 70, volume: 321000 }],
-  },
-  {
-    id: "evt-ai-headlines",
-    category: "Tech & Science",
-    subcategory: "AI",
-    title: "Which AI company will dominate headlines this week?",
-    startTime: "2026-04-18T06:00:00-07:00",
-    isLive: true,
-    markets: [
-      { id: "openai", label: "OpenAI", bid: 64, ask: 68, volume: 403000 },
-      { id: "google", label: "Google", bid: 27, ask: 31, volume: 212000 },
-      { id: "anthropic", label: "Anthropic", bid: 18, ask: 22, volume: 118000 },
-    ],
-  },
-  {
-    id: "evt-weather-nyc",
-    category: "Climate",
-    subcategory: "Weather",
-    title: "Will NYC hit 80F tomorrow?",
-    startTime: "2026-04-18T08:00:00-04:00",
-    isLive: false,
-    markets: [{ id: "yes", label: "Yes", bid: 22, ask: 26, volume: 82000 }],
-  },
-];
-
-const ALL_CATEGORIES = Array.from(
-  new Set(MOCK_EVENTS.map((event) => event.category)),
-).sort();
-
-const ALL_SUBCATEGORIES = Array.from(
-  new Set(MOCK_EVENTS.map((event) => event.subcategory)),
-).sort();
+const API_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2";
 
 const defaultFilters: FilterState = {
   categories: [],
@@ -221,6 +169,16 @@ function parseNumber(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parsePriceToCents(value?: string): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? Math.round(parsed * 100) : 0;
+}
+
+function parseVolume(value?: string): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? Math.round(parsed) : 0;
+}
+
 function formatCurrencyPoints(value: number | null): string {
   return value === null ? "--" : `${value.toFixed(0)}c`;
 }
@@ -253,24 +211,117 @@ function rangePasses(value: number, min: string, max: string): boolean {
   return true;
 }
 
+function getMarketLabel(market: ApiMarket): string {
+  return market.subtitle || market.yes_sub_title || market.title || market.ticker;
+}
+
+function normalizeApiEvent(event: ApiEvent): EventRecord | null {
+  const rawMarkets = event.markets ?? [];
+  const openMarkets = rawMarkets.filter((market) => market.status === "open");
+
+  if (openMarkets.length === 0) {
+    return null;
+  }
+
+  const markets: MarketRecord[] = openMarkets.map((market) => ({
+    id: market.ticker,
+    label: getMarketLabel(market),
+    bid: parsePriceToCents(market.yes_bid_dollars),
+    ask: parsePriceToCents(market.yes_ask_dollars),
+    volume: parseVolume(market.volume_fp),
+    rulesPrimary: market.rules_primary ?? "",
+  }));
+
+  return {
+    id: event.event_ticker,
+    category: event.category || "Other",
+    subcategory: event.sub_title || event.series_ticker || "General",
+    title: event.title,
+    startTime: event.strike_date || new Date().toISOString(),
+    isLive: markets.some((market) => market.volume > 0),
+    markets,
+  };
+}
+
+async function fetchEventCollection(
+  path: string,
+  includeStatus: boolean,
+  signal: AbortSignal,
+): Promise<EventRecord[]> {
+  const events: EventRecord[] = [];
+  let cursor = "";
+
+  while (true) {
+    const params = new URLSearchParams({
+      with_nested_markets: "true",
+      limit: "200",
+    });
+
+    if (includeStatus) {
+      params.set("status", "open");
+    }
+
+    if (cursor) {
+      params.set("cursor", cursor);
+    }
+
+    const response = await fetch(`${API_BASE_URL}${path}?${params.toString()}`, {
+      signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Kalshi request failed with ${response.status}`);
+    }
+
+    const payload = (await response.json()) as { events?: ApiEvent[]; cursor?: string };
+
+    for (const event of payload.events ?? []) {
+      const normalized = normalizeApiEvent(event);
+      if (normalized) {
+        events.push(normalized);
+      }
+    }
+
+    cursor = payload.cursor ?? "";
+    if (!cursor) {
+      break;
+    }
+  }
+
+  return events;
+}
+
+async function fetchAllOpenEvents(signal: AbortSignal): Promise<EventRecord[]> {
+  const [standardEvents, multivariateEvents] = await Promise.all([
+    fetchEventCollection("/events", true, signal),
+    fetchEventCollection("/events/multivariate", false, signal),
+  ]);
+
+  const deduped = new Map<string, EventRecord>();
+  for (const event of [...standardEvents, ...multivariateEvents]) {
+    deduped.set(event.id, event);
+  }
+  return Array.from(deduped.values());
+}
+
 function flattenEvents(events: EventRecord[]): FlatRow[] {
   return events.flatMap((event) =>
     event.markets.map((market) => ({
-      kind: "market" as const,
-      id: `${event.id}-${market.id}`,
+      id: market.id,
       eventId: event.id,
       category: event.category,
       subcategory: event.subcategory,
-      marketName: market.label,
       eventTitle: event.title,
       displayName:
         event.markets.length > 1 ? `${event.title} - ${market.label}` : event.title,
+      marketLabel: market.label,
       startTime: event.startTime,
       isLive: event.isLive,
       bid: market.bid,
       ask: market.ask,
       volume: market.volume,
       spread: market.ask - market.bid,
+      rulesPrimary: market.rulesPrimary,
     })),
   );
 }
@@ -296,7 +347,7 @@ function filterRows(rows: FlatRow[], filters: FilterState): FlatRow[] {
 
     if (
       keyword &&
-      !`${row.eventTitle} ${row.marketName} ${row.category} ${row.subcategory}`
+      !`${row.eventTitle} ${row.marketLabel} ${row.category} ${row.subcategory}`
         .toLowerCase()
         .includes(keyword)
     ) {
@@ -373,21 +424,20 @@ function sortRows(rows: FlatRow[], topBar: TopBarState): FlatRow[] {
 }
 
 function buildGroups(rows: FlatRow[], topBar: TopBarState): EventGroup[] {
-  const byEvent = new Map<string, EventGroup>();
+  const grouped = new Map<string, EventGroup>();
 
   for (const row of rows) {
-    const existing = byEvent.get(row.eventId);
+    const existing = grouped.get(row.eventId);
 
     if (existing) {
       existing.childRows.push(row);
       existing.aggregateVolume += row.volume;
       existing.sortBid = Math.max(existing.sortBid, row.bid);
       existing.sortAsk = Math.max(existing.sortAsk, row.ask);
-      existing.spread = Math.max(existing.spread, row.spread);
       continue;
     }
 
-    byEvent.set(row.eventId, {
+    grouped.set(row.eventId, {
       id: row.eventId,
       category: row.category,
       subcategory: row.subcategory,
@@ -400,19 +450,16 @@ function buildGroups(rows: FlatRow[], topBar: TopBarState): EventGroup[] {
       summaryAsk: row.ask,
       sortBid: row.bid,
       sortAsk: row.ask,
-      spread: row.spread,
     });
   }
 
-  const groups = Array.from(byEvent.values()).map((group) => {
+  const groups = Array.from(grouped.values()).map((group) => {
     const sortedChildren = sortRows(group.childRows, topBar);
-    const hasMultipleMarkets = sortedChildren.length > 1;
-
     return {
       ...group,
       childRows: sortedChildren,
-      summaryBid: hasMultipleMarkets ? null : sortedChildren[0].bid,
-      summaryAsk: hasMultipleMarkets ? null : sortedChildren[0].ask,
+      summaryBid: sortedChildren.length === 1 ? sortedChildren[0].bid : null,
+      summaryAsk: sortedChildren.length === 1 ? sortedChildren[0].ask : null,
     };
   });
 
@@ -473,6 +520,26 @@ function isDefaultView(view: ViewState, title: string): boolean {
   return JSON.stringify(view) === JSON.stringify(initialViewState) && !title.trim();
 }
 
+function getNextSortState(
+  field: SortField,
+  current: TopBarState,
+): Pick<TopBarState, "sortField" | "sortDirection"> {
+  if (current.sortField === field) {
+    return {
+      sortField: field,
+      sortDirection: current.sortDirection === "asc" ? "desc" : "asc",
+    };
+  }
+
+  const defaultDirection =
+    field === "bid" || field === "ask" || field === "volume" ? "desc" : "asc";
+
+  return {
+    sortField: field,
+    sortDirection: defaultDirection,
+  };
+}
+
 function App() {
   const [history, setHistory] = useState<HistoryState>({
     past: [],
@@ -481,28 +548,65 @@ function App() {
   });
   const [viewTitle, setViewTitle] = useState("");
   const [expandedEventIds, setExpandedEventIds] = useState<string[]>([]);
-  const [lastMockRefresh, setLastMockRefresh] = useState(new Date());
+  const [events, setEvents] = useState<EventRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
-  const isDirty = !isDefaultView(history.present, viewTitle);
   const flatRows = sortRows(
-    filterRows(flattenEvents(MOCK_EVENTS), history.present.filters),
+    filterRows(flattenEvents(events), history.present.filters),
     history.present.topBar,
   );
   const groupedRows = buildGroups(flatRows, history.present.topBar);
-  const visibleMarketCount = flatRows.length;
-  const visibleEventCount = groupedRows.length;
+  const allRows = flattenEvents(events);
+  const allCategories = Array.from(new Set(allRows.map((row) => row.category))).sort();
+  const allSubcategories = Array.from(
+    new Set(allRows.map((row) => row.subcategory)),
+  ).sort();
+  const isDirty = !isDefaultView(history.present, viewTitle);
   const isBlankDefault =
     history.present.filters.categories.length === 0 &&
     history.present.filters.subcategories.length === 0 &&
     history.present.filters.keyword.trim() === "" &&
     !history.present.filters.liveOnly;
 
+  async function loadKalshiData(signal: AbortSignal) {
+    setIsLoading(true);
+    setLoadError("");
+
+    try {
+      const nextEvents = await fetchAllOpenEvents(signal);
+      if (signal.aborted) {
+        return;
+      }
+      setEvents(nextEvents);
+      setLastRefresh(new Date());
+    } catch (error) {
+      if (signal.aborted) {
+        return;
+      }
+      setLoadError(
+        error instanceof Error ? error.message : "Unable to load Kalshi markets.",
+      );
+    } finally {
+      if (!signal.aborted) {
+        setIsLoading(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadKalshiData(controller.signal);
+    return () => controller.abort();
+  }, []);
+
   useEffect(() => {
     if (history.present.topBar.autoRefresh === "off") {
       return;
     }
 
-    const milliseconds =
+    const intervalMs =
       history.present.topBar.autoRefresh === "15s"
         ? 15000
         : history.present.topBar.autoRefresh === "30s"
@@ -510,8 +614,9 @@ function App() {
           : 60000;
 
     const timer = window.setInterval(() => {
-      setLastMockRefresh(new Date());
-    }, milliseconds);
+      const controller = new AbortController();
+      void loadKalshiData(controller.signal);
+    }, intervalMs);
 
     return () => window.clearInterval(timer);
   }, [history.present.topBar.autoRefresh]);
@@ -570,6 +675,19 @@ function App() {
     });
   }
 
+  function handleSortClick(field: SortField) {
+    const nextSort = getNextSortState(field, history.present.topBar);
+    setHistory((current) =>
+      updateHistory(current, (present) => ({
+        ...present,
+        topBar: {
+          ...present.topBar,
+          ...nextSort,
+        },
+      })),
+    );
+  }
+
   function toggleEventExpansion(eventId: string) {
     setExpandedEventIds((current) =>
       current.includes(eventId)
@@ -582,15 +700,6 @@ function App() {
 
   return (
     <div className="dashboard-shell">
-      <aside className="window-chrome">
-        <div className="window-dots">
-          <span className="dot dot-red" />
-          <span className="dot dot-gold" />
-          <span className="dot dot-green" />
-        </div>
-        <p className="window-caption">Single-view prototype</p>
-      </aside>
-
       <div className="dashboard-app">
         <header className="tab-strip">
           <button className="tab active-tab" type="button">
@@ -647,39 +756,6 @@ function App() {
                 </label>
 
                 <label className="select-control">
-                  <span>Sort by</span>
-                  <select
-                    onChange={(event) =>
-                      setTopBar("sortField", event.currentTarget.value as SortField)
-                    }
-                    value={history.present.topBar.sortField}
-                  >
-                    <option value="category">Category</option>
-                    <option value="market">Market</option>
-                    <option value="bid">Bid</option>
-                    <option value="ask">Ask</option>
-                    <option value="startTime">Start time</option>
-                    <option value="volume">Volume</option>
-                  </select>
-                </label>
-
-                <label className="select-control">
-                  <span>Direction</span>
-                  <select
-                    onChange={(event) =>
-                      setTopBar(
-                        "sortDirection",
-                        event.currentTarget.value as SortDirection,
-                      )
-                    }
-                    value={history.present.topBar.sortDirection}
-                  >
-                    <option value="asc">Ascending</option>
-                    <option value="desc">Descending</option>
-                  </select>
-                </label>
-
-                <label className="select-control">
                   <span>Auto-refresh</span>
                   <select
                     onChange={(event) =>
@@ -700,46 +776,100 @@ function App() {
             </div>
 
             <div className="status-bar">
+              <div className="status-pill">{events.length} open events loaded</div>
+              <div className="status-pill">{allRows.length} open markets loaded</div>
               <div className="status-pill">
+                Showing{" "}
                 {history.present.topBar.groupByEvent
-                  ? `${visibleEventCount} events`
-                  : `${visibleMarketCount} markets`}
+                  ? `${groupedRows.length} events`
+                  : `${flatRows.length} markets`}
               </div>
               <div className="status-pill">
-                Refresh:{" "}
-                {history.present.topBar.autoRefresh === "off"
-                  ? "manual prototype"
-                  : history.present.topBar.autoRefresh}
-              </div>
-              <div className="status-pill">
-                Last refresh {lastMockRefresh.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}
+                Last refresh{" "}
+                {lastRefresh
+                  ? lastRefresh.toLocaleTimeString([], {
+                      hour: "numeric",
+                      minute: "2-digit",
+                      second: "2-digit",
+                    })
+                  : "pending"}
               </div>
             </div>
 
             <section className="main-pane">
               <div className="table-header">
-                <span>Category</span>
-                <span>Market</span>
-                <span>Bid</span>
-                <span>Ask</span>
-                <span>Event start</span>
-                <span>Volume</span>
+                <SortHeader
+                  activeField={history.present.topBar.sortField}
+                  direction={history.present.topBar.sortDirection}
+                  field="category"
+                  label="Category"
+                  onClick={handleSortClick}
+                />
+                <SortHeader
+                  activeField={history.present.topBar.sortField}
+                  direction={history.present.topBar.sortDirection}
+                  field="market"
+                  label="Market"
+                  onClick={handleSortClick}
+                />
+                <SortHeader
+                  activeField={history.present.topBar.sortField}
+                  direction={history.present.topBar.sortDirection}
+                  field="bid"
+                  label="Bid"
+                  onClick={handleSortClick}
+                />
+                <SortHeader
+                  activeField={history.present.topBar.sortField}
+                  direction={history.present.topBar.sortDirection}
+                  field="ask"
+                  label="Ask"
+                  onClick={handleSortClick}
+                />
+                <SortHeader
+                  activeField={history.present.topBar.sortField}
+                  direction={history.present.topBar.sortDirection}
+                  field="startTime"
+                  label="Event start"
+                  onClick={handleSortClick}
+                />
+                <SortHeader
+                  activeField={history.present.topBar.sortField}
+                  direction={history.present.topBar.sortDirection}
+                  field="volume"
+                  label="Volume"
+                  onClick={handleSortClick}
+                />
               </div>
 
-              {isBlankDefault ? (
-                <div className="blank-state">
-                  <p className="blank-eyebrow">Blank default view</p>
-                  <h1>Pick a category or sub-category to begin scanning markets.</h1>
-                  <p>
-                    This prototype starts empty on purpose so the main pane behaves
-                    like the document-style blank view we defined in the spec.
-                  </p>
-                </div>
-              ) : history.present.topBar.groupByEvent ? (
-                <div className="table-body">
-                  {groupedRows.length === 0 ? (
-                    <div className="no-results">
-                      <p>No events match the current filters.</p>
+              <div className="table-body">
+                {loadError ? (
+                  <div className="message-card error-card">
+                    <h1>Kalshi data failed to load.</h1>
+                    <p>{loadError}</p>
+                  </div>
+                ) : isLoading && events.length === 0 ? (
+                  <div className="message-card">
+                    <h1>Loading open markets from Kalshi…</h1>
+                    <p>
+                      This viewer now pulls live event and market data instead of
+                      rendering the original mock prototype.
+                    </p>
+                  </div>
+                ) : isBlankDefault ? (
+                  <div className="message-card">
+                    <p className="blank-eyebrow">Blank default view</p>
+                    <h1>Pick a category or sub-category to begin scanning markets.</h1>
+                    <p>
+                      The app is already loaded with live open Kalshi data, but the
+                      default view intentionally starts with an empty main pane.
+                    </p>
+                  </div>
+                ) : history.present.topBar.groupByEvent ? (
+                  groupedRows.length === 0 ? (
+                    <div className="message-card">
+                      <h1>No events match the current filters.</h1>
+                      <p>Try loosening category, keyword, or range constraints.</p>
                     </div>
                   ) : (
                     groupedRows.map((group) => {
@@ -751,7 +881,7 @@ function App() {
                           <button
                             className="event-row"
                             onClick={() =>
-                              hasChildren ? toggleEventExpansion(group.id) : null
+                              hasChildren ? toggleEventExpansion(group.id) : undefined
                             }
                             type="button"
                           >
@@ -762,16 +892,14 @@ function App() {
                               </span>
                             </span>
                             <span className="cell market-cell">
-                              {hasChildren ? (
-                                <span className="event-toggle-label">
+                              <span className="event-toggle-label">
+                                {hasChildren ? (
                                   <span className="toggle-glyph">
                                     {expanded ? "▾" : "▸"}
                                   </span>
-                                  {group.title}
-                                </span>
-                              ) : (
-                                group.title
-                              )}
+                                ) : null}
+                                {group.title}
+                              </span>
                             </span>
                             <span className="cell numeric-cell">
                               {formatCurrencyPoints(group.summaryBid)}
@@ -791,7 +919,7 @@ function App() {
                                 <div className="child-row" key={row.id}>
                                   <span className="cell category-cell child-category">
                                     <span className="child-market-label">
-                                      {row.marketName}
+                                      {row.marketLabel}
                                     </span>
                                   </span>
                                   <span className="cell market-cell child-market-cell">
@@ -814,37 +942,34 @@ function App() {
                         </div>
                       );
                     })
-                  )}
-                </div>
-              ) : (
-                <div className="table-body">
-                  {flatRows.length === 0 ? (
-                    <div className="no-results">
-                      <p>No markets match the current filters.</p>
+                  )
+                ) : flatRows.length === 0 ? (
+                  <div className="message-card">
+                    <h1>No markets match the current filters.</h1>
+                    <p>Try loosening category, keyword, or range constraints.</p>
+                  </div>
+                ) : (
+                  flatRows.map((row) => (
+                    <div className="market-row" key={row.id}>
+                      <span className="cell category-cell">
+                        <span className="category-pill">{row.category}</span>
+                        <span className="subcategory-text">{row.subcategory}</span>
+                      </span>
+                      <span className="cell market-cell">{row.displayName}</span>
+                      <span className="cell numeric-cell">
+                        {formatCurrencyPoints(row.bid)}
+                      </span>
+                      <span className="cell numeric-cell">
+                        {formatCurrencyPoints(row.ask)}
+                      </span>
+                      <span className="cell">{formatDate(row.startTime)}</span>
+                      <span className="cell numeric-cell">
+                        {formatVolume(row.volume)}
+                      </span>
                     </div>
-                  ) : (
-                    flatRows.map((row) => (
-                      <div className="market-row" key={row.id}>
-                        <span className="cell category-cell">
-                          <span className="category-pill">{row.category}</span>
-                          <span className="subcategory-text">{row.subcategory}</span>
-                        </span>
-                        <span className="cell market-cell">{row.displayName}</span>
-                        <span className="cell numeric-cell">
-                          {formatCurrencyPoints(row.bid)}
-                        </span>
-                        <span className="cell numeric-cell">
-                          {formatCurrencyPoints(row.ask)}
-                        </span>
-                        <span className="cell">{formatDate(row.startTime)}</span>
-                        <span className="cell numeric-cell">
-                          {formatVolume(row.volume)}
-                        </span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
+                  ))
+                )}
+              </div>
             </section>
           </section>
 
@@ -853,8 +978,8 @@ function App() {
               <p className="pane-eyebrow">Filter Configuration</p>
               <h2>Shape the scanner</h2>
               <p>
-                This right rail owns row inclusion logic. It is intentionally
-                separate from the lighter view controls in the top bar.
+                The right pane controls which rows appear. Each pane scrolls
+                independently so the app shell stays fixed.
               </p>
             </div>
 
@@ -874,7 +999,7 @@ function App() {
               </div>
 
               <div className="tag-grid">
-                {ALL_CATEGORIES.map((category) => (
+                {allCategories.map((category) => (
                   <button
                     className={
                       history.present.filters.categories.includes(category)
@@ -896,7 +1021,7 @@ function App() {
               </div>
 
               <div className="tag-grid muted-grid">
-                {ALL_SUBCATEGORIES.map((subcategory) => (
+                {allSubcategories.map((subcategory) => (
                   <button
                     className={
                       history.present.filters.subcategories.includes(subcategory)
@@ -937,7 +1062,6 @@ function App() {
               <div className="section-header">
                 <h3>Ranges</h3>
               </div>
-
               <div className="range-grid">
                 <RangePair
                   label="Volume"
@@ -1003,6 +1127,36 @@ function RangePair({ label, minKey, maxKey, state, onChange }: RangePairProps) {
         />
       </div>
     </div>
+  );
+}
+
+type SortHeaderProps = {
+  field: SortField;
+  label: string;
+  activeField: SortField;
+  direction: SortDirection;
+  onClick: (field: SortField) => void;
+};
+
+function SortHeader({
+  field,
+  label,
+  activeField,
+  direction,
+  onClick,
+}: SortHeaderProps) {
+  const isActive = activeField === field;
+  const arrow = isActive ? (direction === "asc" ? "↑" : "↓") : "";
+
+  return (
+    <button
+      className={isActive ? "header-button active-header" : "header-button"}
+      onClick={() => onClick(field)}
+      type="button"
+    >
+      <span>{label}</span>
+      <span className="header-arrow">{arrow}</span>
+    </button>
   );
 }
 
