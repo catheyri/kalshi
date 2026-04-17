@@ -86,6 +86,21 @@ Current interpretation:
 - Row expansion / collapse state should not be part of the history model
 - Tabs should behave like independent workspaces, each with its own current state and history
 
+### Primary Workspace Tabs
+
+In addition to saved-view tabs, the scanner should expose primary workspace tabs for the main data modes:
+
+- `Markets`
+- `Positions`
+- `Watching`
+
+Current interpretation:
+
+- `Markets` is the main open-market scanner
+- `Positions` shows currently open positions
+- `Watching` shows markets that have been starred/pinned for monitoring
+- The same core filter model should apply across these tabs where practical
+
 ### Main Pane
 
 The main pane is a market scanner rather than a highly visual browsing experience.
@@ -113,7 +128,6 @@ Initial assumption:
 Initial filter set:
 
 - Category
-- Sub-category
 - Live events only
 - Volume range
 - Bid / ask spread range
@@ -127,6 +141,11 @@ Possible future additions:
 - Event timing windows
 - Saved filter presets
 - More advanced text / rule-based filtering
+
+Current implementation note:
+
+- `Sub-category` is intentionally removed from the near-term UI because the available values are too numerous and noisy to be useful in the current right-side pane
+- Volume filtering for the `Markets` tab is a deferred TODO until we have a lightweight way to obtain trustworthy event-level volume without loading every market up front
 
 ### Control Placement Principles
 
@@ -258,6 +277,28 @@ The first version of this dashboard may simply be:
 
 - A configurable list of open markets
 - A persistent filter panel on the right
+
+### Positions Tab
+
+The product should include a dedicated `Positions` tab.
+
+Behavior:
+
+- Pull down all open-position data at once for the current account
+- Apply filtering locally after the data is loaded
+- Reuse the same core filter controls as the market scanner
+- Surface position-specific values in the table, such as current position and exposure
+
+### Watching Tab
+
+The product should include a dedicated `Watching` tab.
+
+Behavior:
+
+- The user can star or pin an individual market from elsewhere in the app
+- Starred markets are collected into the `Watching` tab
+- The watchlist is intended as a lightweight personal monitor, separate from actual positions
+- Watched-market filtering should happen locally after their data is loaded
 - A clean, low-noise layout optimized for scanning
 
 ### Sorting

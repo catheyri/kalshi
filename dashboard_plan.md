@@ -111,6 +111,10 @@ Deliverable:
 
 - The dashboard displays real open Kalshi markets and responds to filters/sorts
 
+Implementation note:
+
+- Event-summary volume is a known follow-up item; volume filtering on the `Markets` tab should be revisited once we have a lightweight event-level aggregation path
+
 Why this phase matters:
 
 - This is the first genuinely useful version of the product
@@ -127,10 +131,13 @@ Scope:
 - Order-book interaction from bid/ask
 - External-link action to open the Kalshi page
 - Expand/collapse event groups in grouped mode
+- Star / pin interaction on individual markets
+- `Watching` tab backed by starred markets
+- `Positions` tab that loads all open positions for local filtering
 
 Deliverable:
 
-- The scanner becomes a usable browsing and inspection tool rather than just a filtered list
+- The scanner becomes a usable browsing and inspection tool rather than just a filtered list, with dedicated views for open positions and watched markets
 
 Why this phase matters:
 
@@ -175,6 +182,7 @@ Scope:
 - Better empty/loading/error states
 - Performance tuning for larger result sets
 - Better context-menu and keyboard-flow ergonomics
+- Better affordances around deferred filters such as event-level volume
 
 Deliverable:
 
