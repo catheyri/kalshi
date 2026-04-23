@@ -51,7 +51,13 @@ class KalshiPublicClient:
     def get_json(self, path: str, params: Optional[Dict[str, str]] = None) -> dict:
         query = f"?{urlencode(params)}" if params else ""
         text = self.client.get_text(f"{self.base_url}{path}{query}")
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            snippet = text.strip().replace("\n", " ")[:160]
+            raise RuntimeError(
+                f"Expected JSON from {self.base_url}{path}{query}, got non-JSON response: {snippet}"
+            ) from exc
 
     def fetch_market(self, ticker: str) -> dict:
         return self.get_json(f"/markets/{ticker}").get("market", {})
@@ -59,6 +65,35 @@ class KalshiPublicClient:
     def fetch_event(self, event_ticker: str, *, with_nested_markets: bool = False) -> dict:
         params = {"with_nested_markets": "true"} if with_nested_markets else None
         return self.get_json(f"/events/{event_ticker}", params=params).get("event", {})
+
+    def fetch_markets_page(
+        self,
+        *,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+        event_ticker: Optional[str] = None,
+        series_ticker: Optional[str] = None,
+        min_close_ts: Optional[int] = None,
+        max_close_ts: Optional[int] = None,
+        status: Optional[str] = None,
+        tickers: Optional[Iterable[str]] = None,
+    ) -> dict:
+        params: Dict[str, str] = {"limit": str(limit)}
+        if cursor:
+            params["cursor"] = cursor
+        if event_ticker:
+            params["event_ticker"] = event_ticker
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if min_close_ts is not None:
+            params["min_close_ts"] = str(min_close_ts)
+        if max_close_ts is not None:
+            params["max_close_ts"] = str(max_close_ts)
+        if status:
+            params["status"] = status
+        if tickers:
+            params["tickers"] = ",".join(tickers)
+        return self.get_json("/markets", params=params)
 
     def fetch_events_page(
         self,

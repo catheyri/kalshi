@@ -94,6 +94,67 @@ class WhiteHouseMarketParsingTests(unittest.TestCase):
         self.assertEqual(parsed.metadata["target_phrase"], "tariffs")
         self.assertEqual(parsed.metadata["briefing_scope"], "today")
 
+    def test_parser_uses_subtitle_as_phrase_fallback(self):
+        market = Market(
+            market_id="KXWHITEHOUSE-SUBTITLE-1",
+            event_id="WHBRIEF-3B",
+            series_id=None,
+            title="What will Karoline Leavitt say during the White House press briefing today?",
+            subtitle="border crisis",
+            status="open",
+            close_time="2026-04-22T18:00:00Z",
+            settlement_time=None,
+            yes_bid=41,
+            yes_ask=46,
+            no_bid=54,
+            no_ask=59,
+            volume=120,
+            open_interest=22,
+            rules_text=None,
+            rules_summary_text=None,
+            source_text=None,
+            url=None,
+            last_updated_at=None,
+            metadata={},
+        )
+
+        parsed = WhiteHouseMentionMarketParser().parse(market)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.metadata["target_phrase"], "border crisis")
+
+    def test_parser_uses_event_title_context_for_generic_press_secretary_markets(self):
+        market = Market(
+            market_id="KXSECPRESSMENTION-26MAY07-TARI",
+            event_id="KXSECPRESSMENTION-26MAY07",
+            series_id="KXSECPRESSMENTION",
+            title="Will the White House Press Secretary say Tariff at her next press briefing?",
+            subtitle="Tariff",
+            status="active",
+            close_time="2026-05-07T14:00:00Z",
+            settlement_time=None,
+            yes_bid=35,
+            yes_ask=41,
+            no_bid=59,
+            no_ask=65,
+            volume=75,
+            open_interest=12,
+            rules_text="Resolves YES if the White House Press Secretary says the phrase Tariff at her next press briefing.",
+            rules_summary_text=None,
+            source_text=None,
+            url=None,
+            last_updated_at=None,
+            metadata={
+                "event_title": "What will Karoline Leavitt say in the next press briefing?",
+                "event_subtitle": "Before May 7, 2026",
+            },
+        )
+
+        parsed = WhiteHouseMentionMarketParser().parse(market)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.metadata["speaker_key"], "karoline_leavitt")
+        self.assertEqual(parsed.metadata["target_phrase"], "Tariff")
+        self.assertEqual(parsed.metadata["briefing_scope"], "next_briefing")
+
     def test_parser_accepts_custom_speaker_rule(self):
         market = Market(
             market_id="KXWHITEHOUSE-CUSTOM-1",

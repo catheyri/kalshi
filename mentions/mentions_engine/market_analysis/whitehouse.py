@@ -50,7 +50,16 @@ class WhiteHouseMentionMarketParser:
 
     def parse(self, market: Market) -> Optional[Market]:
         haystack = " ".join(
-            value for value in [market.title, market.subtitle, market.rules_text, market.source_text] if value
+            value
+            for value in [
+                market.title,
+                market.subtitle,
+                market.rules_text,
+                market.source_text,
+                market.metadata.get("event_title"),
+                market.metadata.get("event_subtitle"),
+            ]
+            if value
         )
         normalized = normalize_text(haystack)
         if not normalized:
@@ -82,7 +91,8 @@ class WhiteHouseMentionMarketParser:
                 "target_terms": [target_phrase],
                 "target_phrase_normalized": normalize_text(target_phrase),
                 "briefing_scope": self._infer_briefing_scope(normalized),
-                "event_title": self._build_event_title(speaker_rule.canonical_name, event_date),
+                "event_title": metadata.get("event_title")
+                or self._build_event_title(speaker_rule.canonical_name, event_date),
                 "event_date": event_date,
                 "mapping_strategy": "speaker_first_market_parse",
             }
@@ -130,6 +140,11 @@ class WhiteHouseMentionMarketParser:
             if flattened:
                 return self._clean_target_phrase(flattened[0])
 
+        if market.subtitle:
+            subtitle_value = self._clean_target_phrase(market.subtitle)
+            if subtitle_value:
+                return subtitle_value
+
         patterns = tuple(speaker_rule.target_phrase_patterns) or self.target_phrase_patterns
         for candidate in candidates:
             extracted = self._extract_with_patterns(candidate, patterns)
@@ -152,9 +167,16 @@ class WhiteHouseMentionMarketParser:
         return value.strip()
 
     def _infer_briefing_scope(self, normalized_text: str) -> str:
-        for label in ["today", "tomorrow", "this week", "next briefing"]:
-            if label in normalized_text:
-                return label.replace(" ", "_")
+        scope_patterns = (
+            ("today", "today"),
+            ("tomorrow", "tomorrow"),
+            ("this week", "this_week"),
+            ("next press briefing", "next_briefing"),
+            ("next briefing", "next_briefing"),
+        )
+        for needle, label in scope_patterns:
+            if needle in normalized_text:
+                return label
         return "unspecified"
 
     def _infer_event_date(self, market: Market) -> Optional[str]:

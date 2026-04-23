@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
 from mentions_engine.config import default_paths
 from mentions_engine.engine import Engine
+from mentions_engine.http import HttpClient
 from mentions_engine.kalshi import KalshiPublicClient
 from mentions_engine.market_analysis import WhiteHouseMentionMarketParser
 from mentions_engine.market_ingest import JsonFileMarketIngestor
@@ -27,6 +29,11 @@ from mentions_engine.registry import (
 from mentions_engine.rules import compile_bundle_from_json
 from mentions_engine.storage import Database
 from mentions_engine.utils import dump_json
+from mentions_engine.whitehouse_markets import (
+    WhiteHouseMentionMarketReporter,
+    render_whitehouse_mention_event_report,
+    render_whitehouse_mention_market_report,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,7 +44,8 @@ def main(argv: list[str] | None = None) -> int:
             "Commands: init-db, ingest-markets, ingest-kalshi-market-tickers, ingest-kalshi-event-tickers, "
             "ingest-kalshi-category, ingest-whitehouse-mention-market-tickers, "
             "ingest-whitehouse-mention-event-tickers, ingest-whitehouse-mention-category, map-market, "
-            "record-outcome, import-outcomes, import-kalshi-outcomes, estimate-market, list-markets, export-dataset, sync-events, fetch-sources, build-transcript, "
+            "record-outcome, import-outcomes, import-kalshi-outcomes, estimate-market, list-markets, "
+            "list-whitehouse-mention-markets, export-dataset, sync-events, fetch-sources, build-transcript, "
             "compile-rule, run-rule",
             file=sys.stderr,
         )
@@ -194,6 +202,81 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(engine.list_markets_with_latest_estimates(status=status), indent=2))
         return 0
 
+    if command == "list-whitehouse-mention-markets":
+        db.initialize()
+        parser = _build_list_whitehouse_mention_markets_parser()
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
+        try:
+            report = WhiteHouseMentionMarketReporter(
+                KalshiPublicClient(client=HttpClient(allow_insecure_ssl=args.insecure_ssl)),
+                db=db,
+            ).build_report(
+                speaker_key=args.speaker_key,
+                history_limit=args.history_limit,
+                lookback_days=args.lookback_days,
+                window_days=args.window_days,
+                historical_pages_per_window=args.historical_pages_per_window,
+                open_pages=args.open_pages,
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "view": args.view,
+                        "speaker_key": report.speaker_key,
+                        "speaker_name": report.speaker_name,
+                        "historical_markets": [market.to_dict() for market in report.historical_markets],
+                        "live_markets": [market.to_dict() for market in report.live_markets],
+                        "historical_events": [
+                            {
+                                "event_ticker": event.event_ticker,
+                                "series_ticker": event.series_ticker,
+                                "title": event.title,
+                                "subtitle": event.subtitle,
+                                "category": event.category,
+                                "latest_close_time": event.latest_close_time,
+                                "market_count": event.market_count,
+                                "status_counts": event.status_counts,
+                            }
+                            for event in report.historical_events
+                        ],
+                        "live_events": [
+                            {
+                                "event_ticker": event.event_ticker,
+                                "series_ticker": event.series_ticker,
+                                "title": event.title,
+                                "subtitle": event.subtitle,
+                                "category": event.category,
+                                "latest_close_time": event.latest_close_time,
+                                "market_count": event.market_count,
+                                "status_counts": event.status_counts,
+                            }
+                            for event in report.live_events
+                        ],
+                        "lookback_days": report.lookback_days,
+                        "window_days": report.window_days,
+                        "historical_pages_per_window": report.historical_pages_per_window,
+                        "open_pages": report.open_pages,
+                        "scanned_historical_windows": report.scanned_historical_windows,
+                        "scanned_historical_pages": report.scanned_historical_pages,
+                        "scanned_live_pages": report.scanned_live_pages,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            if args.view == "events":
+                print(render_whitehouse_mention_event_report(report))
+            else:
+                print(render_whitehouse_mention_market_report(report))
+        return 0
+
     if command == "export-dataset":
         db.initialize()
         output_path = None if not argv else Path(argv[0])
@@ -270,6 +353,23 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Unknown command: {command}", file=sys.stderr)
     return 1
+
+
+def _build_list_whitehouse_mention_markets_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m mentions_engine.cli list-whitehouse-mention-markets",
+        description="List historical and live White House mention markets for a speaker.",
+    )
+    parser.add_argument("--speaker-key", default="karoline_leavitt")
+    parser.add_argument("--view", choices=("markets", "events"), default="markets")
+    parser.add_argument("--history-limit", type=int, default=10)
+    parser.add_argument("--lookback-days", type=int, default=365)
+    parser.add_argument("--window-days", type=int, default=30)
+    parser.add_argument("--historical-pages-per-window", type=int, default=1)
+    parser.add_argument("--open-pages", type=int, default=5)
+    parser.add_argument("--insecure-ssl", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    return parser
 
 
 if __name__ == "__main__":

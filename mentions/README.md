@@ -39,9 +39,15 @@ python3 -m mentions_engine.cli import-kalshi-outcomes <ticker> [ticker...]
 python3 -m mentions_engine.cli map-market <market_id>
 python3 -m mentions_engine.cli estimate-market <market_id>
 python3 -m mentions_engine.cli list-markets open
+python3 -m mentions_engine.cli list-whitehouse-mention-markets
+python3 -m mentions_engine.cli list-whitehouse-mention-markets --view events
+python3 -m mentions_engine.cli list-whitehouse-mention-markets --insecure-ssl
+python3 -m mentions_engine.cli list-whitehouse-mention-markets --speaker-key karoline_leavitt --history-limit 10 --lookback-days 365
 python3 -m mentions_engine.cli export-dataset data/derived/datasets/open.jsonl open
 ```
 
 For the White House vertical, prefer the `ingest-whitehouse-mention-*` commands. They filter to briefing mention markets and enrich stored `Market` records with parsed metadata like `speaker_name`, `speaker_key`, `target_phrase`, and `event_family`.
+
+`list-whitehouse-mention-markets` performs a bounded live Kalshi scan, stores any matching White House mention markets in the local DB, and prints separate tables for recent historical markets and live/upcoming markets. Pass `--view events` to collapse matching child markets into parent briefing events. Use `--insecure-ssl` only on machines with broken local certificate chains.
 
 Project config lives in [`pyproject.toml`](pyproject.toml).
