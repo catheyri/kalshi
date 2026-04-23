@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mentions-engine"
+version = "0.1.0"
+description = "Transcript-first tooling for Kalshi mention-market research"
+requires-python = ">=3.9"
+dependencies = [
+  "youtube-transcript-api>=1.2.4",
+]
+
+[tool.setuptools]
+packages = [
+  "mentions_engine",
+  "mentions_engine.models",
+  "mentions_engine.storage",
+  "mentions_engine.discovery",
+  "mentions_engine.acquisition",
+  "mentions_engine.transcripts",
+  "mentions_engine.rules",
+  "mentions_engine.matcher",
+]

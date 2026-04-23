@@ -1,6 +1,7 @@
 .env
 default.txt
-node_modules
-dist
-src-tauri/target
+dashboard/node_modules
+dashboard/dist
+dashboard/src-tauri/target
 __pycache__
+mentions/data/

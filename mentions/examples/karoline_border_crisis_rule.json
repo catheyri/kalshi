@@ -1,0 +1,18 @@
+{
+  "market_id": "demo-karoline-border-crisis",
+  "target_terms": ["border crisis"],
+  "allowed_variants": ["the border crisis"],
+  "disallowed_variants": [],
+  "speaker_scope": ["primary_speaker"],
+  "time_scope": {},
+  "source_scope": ["official_transcript", "official_video_asr"],
+  "feed_scope": [],
+  "quotation_policy": "include",
+  "caption_policy": "include",
+  "partial_word_policy": "reject",
+  "case_sensitivity": false,
+  "stemming_policy": "off",
+  "counting_threshold": 1,
+  "requires_exact_phrase": true,
+  "notes": "Example rule for transcript-first MVP."
+}

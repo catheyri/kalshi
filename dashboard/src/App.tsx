@@ -116,6 +116,7 @@ type CategoryCacheEntry = {
   events: EventSummary[];
   isLoading: boolean;
   isComplete: boolean;
+  lastUpdatedAt: number | null;
 };
 
 type EventDetailCacheEntry = {
@@ -199,6 +200,63 @@ const initialViewState: ViewState = {
   filters: defaultFilters,
   topBar: defaultTopBar,
 };
+
+const PERF_FLAG = "kalshi-dashboard-perf";
+
+function isPerfEnabled(): boolean {
+  if (!import.meta.env.DEV) {
+    return false;
+  }
+
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.localStorage.getItem(PERF_FLAG) === "1";
+}
+
+function logPerfMetric(name: string, durationMs: number, detail?: Record<string, unknown>) {
+  if (!isPerfEnabled()) {
+    return;
+  }
+
+  const payload = {
+    kind: "ui",
+    name,
+    duration_ms: Number(durationMs.toFixed(2)),
+    ...detail,
+  };
+
+  console.log("[perf]", JSON.stringify(payload));
+}
+
+function measurePerf<T>(name: string, run: () => T, detail?: Record<string, unknown>): T {
+  if (!isPerfEnabled()) {
+    return run();
+  }
+
+  const startedAt = performance.now();
+  const result = run();
+  logPerfMetric(name, performance.now() - startedAt, detail);
+  return result;
+}
+
+async function measureAsyncPerf<T>(
+  name: string,
+  run: () => Promise<T>,
+  detail?: Record<string, unknown>,
+): Promise<T> {
+  if (!isPerfEnabled()) {
+    return run();
+  }
+
+  const startedAt = performance.now();
+  try {
+    return await run();
+  } finally {
+    logPerfMetric(name, performance.now() - startedAt, detail);
+  }
+}
 
 function updateHistory(
   history: HistoryState,
@@ -325,6 +383,66 @@ function mergeEventSummaries(current: EventSummary[], incoming: EventSummary[]) 
     deduped.set(event.id, event);
   }
   return Array.from(deduped.values());
+}
+
+function delayMs(durationMs: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, durationMs));
+}
+
+function getCategoryRefreshFreshnessMs(autoRefresh: RefreshInterval): number {
+  if (autoRefresh === "15s") {
+    return 10_000;
+  }
+
+  if (autoRefresh === "30s") {
+    return 20_000;
+  }
+
+  if (autoRefresh === "60s") {
+    return 40_000;
+  }
+
+  return 0;
+}
+
+function getCategoryRefreshStatus(
+  entry: CategoryCacheEntry | undefined,
+  freshnessMs: number,
+): "loading" | "fresh" | "stale" | "pending" {
+  if (!entry) {
+    return "pending";
+  }
+
+  if (entry.isLoading) {
+    return "loading";
+  }
+
+  if (entry.lastUpdatedAt === null) {
+    return "pending";
+  }
+
+  if (freshnessMs > 0 && Date.now() - entry.lastUpdatedAt < freshnessMs) {
+    return "fresh";
+  }
+
+  return "stale";
+}
+
+function formatElapsedMs(timestamp: number | null): string {
+  if (timestamp === null) {
+    return "Not loaded yet";
+  }
+
+  const elapsedSeconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+  if (elapsedSeconds < 5) {
+    return "Updated just now";
+  }
+  if (elapsedSeconds < 60) {
+    return `Updated ${elapsedSeconds}s ago`;
+  }
+
+  const elapsedMinutes = Math.round(elapsedSeconds / 60);
+  return `Updated ${elapsedMinutes}m ago`;
 }
 
 function compareValues(
@@ -572,73 +690,89 @@ function App() {
   const [watchedTickers, setWatchedTickers] = useState<string[]>([]);
   const inFlightCategories = useRef<Set<string>>(new Set());
   const inFlightDetails = useRef<Set<string>>(new Set());
+  const marketsRefreshInFlightRef = useRef(false);
   const deferredViewState = useDeferredValue(history.present);
+  const pendingInteractionRef = useRef<{
+    name: string;
+    startedAt: number;
+    detail?: Record<string, unknown>;
+  } | null>(null);
 
   const selectedCategories = history.present.filters.categories;
 
   const allSelectedEvents = useMemo(() => {
-    const deduped = new Map<string, EventSummary>();
-    for (const category of selectedCategories) {
-      const entry = categoryCache[category];
-      if (!entry) {
-        continue;
+    return measurePerf("derive:allSelectedEvents", () => {
+      const deduped = new Map<string, EventSummary>();
+      for (const category of selectedCategories) {
+        const entry = categoryCache[category];
+        if (!entry) {
+          continue;
+        }
+        for (const event of entry.events) {
+          deduped.set(event.id, event);
+        }
       }
-      for (const event of entry.events) {
-        deduped.set(event.id, event);
-      }
-    }
-    return Array.from(deduped.values());
+      return Array.from(deduped.values());
+    }, { selected_categories: selectedCategories.length });
   }, [categoryCache, selectedCategories]);
 
   const filteredEvents = useMemo(() => {
-    const keyword = deferredViewState.filters.keyword.trim().toLowerCase();
+    return measurePerf("derive:filteredEvents", () => {
+      const keyword = deferredViewState.filters.keyword.trim().toLowerCase();
 
-    return allSelectedEvents.filter((event) => {
-      if (deferredViewState.filters.liveOnly && !event.isLive) {
-        return false;
-      }
+      return allSelectedEvents.filter((event) => {
+        if (deferredViewState.filters.liveOnly && !event.isLive) {
+          return false;
+        }
 
-      if (
-        keyword &&
-        !`${event.title} ${event.category} ${event.subcategory}`
-          .toLowerCase()
-          .includes(keyword)
-      ) {
-        return false;
-      }
+        if (
+          keyword &&
+          !`${event.title} ${event.category} ${event.subcategory}`
+            .toLowerCase()
+            .includes(keyword)
+        ) {
+          return false;
+        }
 
-      return true;
-    });
+        return true;
+      });
+    }, { input_rows: allSelectedEvents.length });
   }, [allSelectedEvents, deferredViewState.filters]);
 
   const sortedEvents = useMemo(() => {
-    return sortEventGroups(
-      filteredEvents.map((event) => ({
-        id: event.id,
-        category: event.category,
-        title: event.title,
-        startTime: event.startTime,
-        isLive: event.isLive,
-        rows:
-          detailsCache[event.id]?.loaded
-            ? detailsCache[event.id].markets.map((market) => ({
-                yesBid: market.yesBid,
-                noBid: market.noBid,
-                volume: market.volume,
-              }))
-            : [],
-      })),
-      deferredViewState.topBar,
-    ).map((group) =>
-      filteredEvents.find((event) => event.id === group.id) ?? {
-        id: group.id,
-        category: group.category,
-        title: group.title,
-        startTime: group.startTime,
-        isLive: group.isLive,
-        subcategory: "",
-      },
-    );
+    return measurePerf("derive:sortedEvents", () => {
+      return sortEventGroups(
+        filteredEvents.map((event) => ({
+          id: event.id,
+          category: event.category,
+          title: event.title,
+          startTime: event.startTime,
+          isLive: event.isLive,
+          rows:
+            detailsCache[event.id]?.loaded
+              ? detailsCache[event.id].markets.map((market) => ({
+                  yesBid: market.yesBid,
+                  noBid: market.noBid,
+                  volume: market.volume,
+                }))
+              : [],
+        })),
+        deferredViewState.topBar,
+      ).map((group) =>
+        filteredEvents.find((event) => event.id === group.id) ?? {
+          id: group.id,
+          category: group.category,
+          title: group.title,
+          startTime: group.startTime,
+          isLive: group.isLive,
+          subcategory: "",
+        },
+      );
+    }, {
+      input_rows: filteredEvents.length,
+      sort_field: deferredViewState.topBar.sortField,
+      sort_direction: deferredViewState.topBar.sortDirection,
+    });
   }, [deferredViewState.topBar, detailsCache, filteredEvents]);
 
   const pagedEvents = useMemo(() => {
@@ -648,45 +782,97 @@ function App() {
   }, [currentPage, deferredViewState.topBar.pageSize, sortedEvents]);
 
   const flatMarketRows = useMemo(() => {
-    const loadedRows = flattenLoadedMarkets(pagedEvents, detailsCache);
-    return loadedRows.filter((row) => {
-      if (!rangePasses(row.spread, deferredViewState.filters.spreadMin, deferredViewState.filters.spreadMax)) {
-        return false;
-      }
-      if (!rangePasses(row.yesBid, deferredViewState.filters.bidMin, deferredViewState.filters.bidMax)) {
-        return false;
-      }
-      if (!rangePasses(row.yesAsk, deferredViewState.filters.askMin, deferredViewState.filters.askMax)) {
-        return false;
-      }
-      return true;
-    });
+    return measurePerf("derive:flatMarketRows", () => {
+      const loadedRows = flattenLoadedMarkets(pagedEvents, detailsCache);
+      return loadedRows.filter((row) => {
+        if (
+          !rangePasses(
+            row.spread,
+            deferredViewState.filters.spreadMin,
+            deferredViewState.filters.spreadMax,
+          )
+        ) {
+          return false;
+        }
+        if (
+          !rangePasses(
+            row.yesBid,
+            deferredViewState.filters.bidMin,
+            deferredViewState.filters.bidMax,
+          )
+        ) {
+          return false;
+        }
+        if (
+          !rangePasses(
+            row.yesAsk,
+            deferredViewState.filters.askMin,
+            deferredViewState.filters.askMax,
+          )
+        ) {
+          return false;
+        }
+        return true;
+      });
+    }, { paged_events: pagedEvents.length });
   }, [deferredViewState.filters, detailsCache, pagedEvents]);
 
   const filteredPositions = useMemo(
-    () => filterPortfolioRows(positions, deferredViewState.filters),
+    () =>
+      measurePerf("derive:filteredPositions", () => filterPortfolioRows(positions, deferredViewState.filters), {
+        input_rows: positions.length,
+      }),
     [deferredViewState.filters, positions],
   );
   const filteredWatching = useMemo(
-    () => filterPortfolioRows(watchingRows, deferredViewState.filters),
+    () =>
+      measurePerf(
+        "derive:filteredWatching",
+        () => filterPortfolioRows(watchingRows, deferredViewState.filters),
+        {
+          input_rows: watchingRows.length,
+        },
+      ),
     [deferredViewState.filters, watchingRows],
   );
 
   const sortedPositions = useMemo(
-    () => sortPortfolioRows(filteredPositions, deferredViewState.topBar),
+    () =>
+      measurePerf(
+        "derive:sortedPositions",
+        () => sortPortfolioRows(filteredPositions, deferredViewState.topBar),
+        {
+          input_rows: filteredPositions.length,
+          sort_field: deferredViewState.topBar.sortField,
+        },
+      ),
     [deferredViewState.topBar, filteredPositions],
   );
   const sortedWatching = useMemo(
-    () => sortPortfolioRows(filteredWatching, deferredViewState.topBar),
+    () =>
+      measurePerf(
+        "derive:sortedWatching",
+        () => sortPortfolioRows(filteredWatching, deferredViewState.topBar),
+        {
+          input_rows: filteredWatching.length,
+          sort_field: deferredViewState.topBar.sortField,
+        },
+      ),
     [deferredViewState.topBar, filteredWatching],
   );
 
   const groupedPositions = useMemo(
-    () => sortEventGroups(groupPortfolioRows(filteredPositions), deferredViewState.topBar),
+    () =>
+      measurePerf("derive:groupedPositions", () => {
+        return sortEventGroups(groupPortfolioRows(filteredPositions), deferredViewState.topBar);
+      }, { input_rows: filteredPositions.length }),
     [deferredViewState.topBar, filteredPositions],
   );
   const groupedWatching = useMemo(
-    () => sortEventGroups(groupPortfolioRows(filteredWatching), deferredViewState.topBar),
+    () =>
+      measurePerf("derive:groupedWatching", () => {
+        return sortEventGroups(groupPortfolioRows(filteredWatching), deferredViewState.topBar);
+      }, { input_rows: filteredWatching.length }),
     [deferredViewState.topBar, filteredWatching],
   );
 
@@ -745,6 +931,38 @@ function App() {
     return sortedWatching.slice(start, end);
   }, [deferredViewState.topBar.pageSize, safeCurrentPage, sortedWatching]);
 
+  const visibleMarketCategories = useMemo(() => {
+    const visible = new Set<string>();
+    const ordered: string[] = [];
+
+    for (const event of pagedEvents) {
+      if (!selectedCategories.includes(event.category) || visible.has(event.category)) {
+        continue;
+      }
+
+      visible.add(event.category);
+      ordered.push(event.category);
+    }
+
+    return ordered;
+  }, [pagedEvents, selectedCategories]);
+  const categoryRefreshFreshnessMs = useMemo(
+    () => getCategoryRefreshFreshnessMs(history.present.topBar.autoRefresh),
+    [history.present.topBar.autoRefresh],
+  );
+  const selectedCategoryStatuses = useMemo(
+    () =>
+      selectedCategories.map((category) => {
+        const entry = categoryCache[category];
+        return {
+          category,
+          detail: formatElapsedMs(entry?.lastUpdatedAt ?? null),
+          status: getCategoryRefreshStatus(entry, categoryRefreshFreshnessMs),
+        };
+      }),
+    [categoryCache, categoryRefreshFreshnessMs, selectedCategories],
+  );
+
   const isDirty = !isDefaultView(history.present, viewTitle);
   const isBlankDefault = activeTab === "markets" && selectedCategories.length === 0;
   const selectedCategoryLoadingCount = selectedCategories.filter(
@@ -762,7 +980,9 @@ function App() {
     setCategoriesError("");
 
     try {
-      const categories = await invoke<string[]>("fetch_categories_command");
+      const categories = await measureAsyncPerf("invoke:fetchCategories", () =>
+        invoke<string[]>("fetch_categories_command"),
+      );
       setAvailableCategories(categories);
     } catch (error) {
       setCategoriesError(
@@ -778,21 +998,33 @@ function App() {
     category: string,
     cursor: string | null,
   ) {
-    return invoke<EventPage>("fetch_event_page_command", {
-      source,
-      category,
-      cursor,
-    });
+    return measureAsyncPerf(
+      "invoke:fetchEventPage",
+      () =>
+        invoke<EventPage>("fetch_event_page_command", {
+          source,
+          category,
+          cursor,
+        }),
+      { source, category, cursor: cursor ?? "initial" },
+    );
   }
 
   async function fetchEventDetails(eventTicker: string) {
-    return invoke<EventDetails>("fetch_event_details_command", {
-      eventTicker,
-    });
+    return measureAsyncPerf(
+      "invoke:fetchEventDetails",
+      () =>
+        invoke<EventDetails>("fetch_event_details_command", {
+          eventTicker,
+        }),
+      { event_ticker: eventTicker },
+    );
   }
 
   async function fetchPositions() {
-    const payload = await invoke<PositionRecord[]>("fetch_positions_command");
+    const payload = await measureAsyncPerf("invoke:fetchPositions", () =>
+      invoke<PositionRecord[]>("fetch_positions_command"),
+    );
     return payload.map<PortfolioRow>((row) => ({
       id: row.ticker,
       eventId: row.eventTicker,
@@ -816,9 +1048,14 @@ function App() {
   }
 
   async function fetchWatching(tickers: string[]) {
-    const payload = await invoke<PositionRecord[]>("fetch_watch_markets_command", {
-      tickers,
-    });
+    const payload = await measureAsyncPerf(
+      "invoke:fetchWatching",
+      () =>
+        invoke<PositionRecord[]>("fetch_watch_markets_command", {
+          tickers,
+        }),
+      { ticker_count: tickers.length },
+    );
     return payload.map<PortfolioRow>((row) => ({
       id: row.ticker,
       eventId: row.eventTicker,
@@ -855,7 +1092,12 @@ function App() {
     setCategoryCache((current) => ({
       ...current,
       [category]: {
-        ...(current[category] ?? { events: [], isLoading: false, isComplete: false }),
+        ...(current[category] ?? {
+          events: [],
+          isLoading: false,
+          isComplete: false,
+          lastUpdatedAt: null,
+        }),
         isLoading: true,
       },
     }));
@@ -878,6 +1120,7 @@ function App() {
             events: accumulated,
             isLoading: true,
             isComplete: false,
+            lastUpdatedAt: current[category]?.lastUpdatedAt ?? null,
           },
         }));
       });
@@ -906,13 +1149,14 @@ function App() {
         startTransition(() => {
           setCategoryCache((current) => ({
             ...current,
-            [category]: {
-              events: snapshot,
-              isLoading: true,
-              isComplete: false,
-            },
-          }));
-        });
+          [category]: {
+            events: snapshot,
+            isLoading: true,
+            isComplete: false,
+            lastUpdatedAt: current[category]?.lastUpdatedAt ?? null,
+          },
+        }));
+      });
       }
 
       startTransition(() => {
@@ -922,6 +1166,60 @@ function App() {
             events: accumulated,
             isLoading: false,
             isComplete: true,
+            lastUpdatedAt: Date.now(),
+          },
+        }));
+      });
+      setLastRefresh(new Date());
+    } finally {
+      inFlightCategories.current.delete(category);
+    }
+  }
+
+  async function refreshCategoryHead(category: string) {
+    if (inFlightCategories.current.has(category)) {
+      return;
+    }
+
+    const existing = categoryCache[category];
+    if (!existing?.events.length) {
+      await loadCategory(category, true);
+      return;
+    }
+
+    inFlightCategories.current.add(category);
+    setCategoryCache((current) => ({
+      ...current,
+      [category]: {
+        ...(current[category] ?? {
+          events: [],
+          isLoading: false,
+          isComplete: false,
+          lastUpdatedAt: null,
+        }),
+        isLoading: true,
+      },
+    }));
+
+    try {
+      const [standardPage, multivariatePage] = await Promise.all([
+        fetchEventPage("standard", category, null),
+        fetchEventPage("multivariate", category, null),
+      ]);
+
+      const refreshedEvents = mergeEventSummaries(existing.events, [
+        ...standardPage.events,
+        ...multivariatePage.events,
+      ]);
+
+      startTransition(() => {
+        setCategoryCache((current) => ({
+          ...current,
+          [category]: {
+            events: refreshedEvents,
+            isLoading: false,
+            isComplete: existing.isComplete,
+            lastUpdatedAt: Date.now(),
           },
         }));
       });
@@ -1018,6 +1316,50 @@ function App() {
     }
   }
 
+  async function refreshMarketsVisibleFirst() {
+    if (selectedCategories.length === 0 || marketsRefreshInFlightRef.current) {
+      return;
+    }
+
+    marketsRefreshInFlightRef.current = true;
+
+    try {
+      const prioritizedCategories =
+        visibleMarketCategories.length > 0
+          ? visibleMarketCategories
+          : selectedCategories.slice(0, Math.min(2, selectedCategories.length));
+      const prioritizedSet = new Set(prioritizedCategories);
+      const backgroundCategories = selectedCategories.filter((category) => {
+        if (prioritizedSet.has(category)) {
+          return false;
+        }
+
+        const lastUpdatedAt = categoryCache[category]?.lastUpdatedAt;
+        if (lastUpdatedAt === null || lastUpdatedAt === undefined) {
+          return true;
+        }
+
+        return Date.now() - lastUpdatedAt >= categoryRefreshFreshnessMs;
+      });
+
+      const prioritizedRefreshes = prioritizedCategories.map((category) =>
+        loadCategory(category, true),
+      );
+
+      if (backgroundCategories.length > 0) {
+        await Promise.race([Promise.allSettled(prioritizedRefreshes), delayMs(500)]);
+      }
+
+      for (const category of backgroundCategories) {
+        await refreshCategoryHead(category);
+      }
+
+      await Promise.allSettled(prioritizedRefreshes);
+    } finally {
+      marketsRefreshInFlightRef.current = false;
+    }
+  }
+
   function toggleWatchTicker(ticker: string) {
     setWatchedTickers((current) => {
       const next = toggleValue(current, ticker);
@@ -1108,9 +1450,7 @@ function App() {
 
     const timer = window.setInterval(() => {
       if (activeTab === "markets") {
-        for (const category of selectedCategories) {
-          void loadCategory(category, true);
-        }
+        void refreshMarketsVisibleFirst();
         return;
       }
 
@@ -1123,9 +1463,49 @@ function App() {
     }, intervalMs);
 
     return () => window.clearInterval(timer);
-  }, [activeTab, history.present.topBar.autoRefresh, selectedCategories, watchedTickers]);
+  }, [
+    activeTab,
+    categoryCache,
+    categoryRefreshFreshnessMs,
+    history.present.topBar.autoRefresh,
+    selectedCategories,
+    visibleMarketCategories,
+    watchedTickers,
+  ]);
+
+  useEffect(() => {
+    if (!pendingInteractionRef.current) {
+      return;
+    }
+
+    const interaction = pendingInteractionRef.current;
+    const frameId = window.requestAnimationFrame(() => {
+      logPerfMetric(
+        `interaction:${interaction.name}`,
+        performance.now() - interaction.startedAt,
+        interaction.detail,
+      );
+      pendingInteractionRef.current = null;
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [
+    activeTab,
+    deferredViewState,
+    safeCurrentPage,
+    pagedEvents,
+    pagedPositionGroups,
+    pagedPositionRows,
+    pagedWatchingGroups,
+    pagedWatchingRows,
+  ]);
 
   function setTopBar<K extends keyof TopBarState>(key: K, value: TopBarState[K]) {
+    pendingInteractionRef.current = {
+      name: "topBarChange",
+      startedAt: performance.now(),
+      detail: { key, value: String(value) },
+    };
     setHistory((current) =>
       updateHistory(current, (present) => ({
         ...present,
@@ -1138,6 +1518,11 @@ function App() {
   }
 
   function setFilter<K extends keyof FilterState>(key: K, value: FilterState[K]) {
+    pendingInteractionRef.current = {
+      name: "filterChange",
+      startedAt: performance.now(),
+      detail: { key },
+    };
     setHistory((current) =>
       updateHistory(current, (present) => ({
         ...present,
@@ -1150,6 +1535,10 @@ function App() {
   }
 
   function goBack() {
+    pendingInteractionRef.current = {
+      name: "historyBack",
+      startedAt: performance.now(),
+    };
     setHistory((current) => {
       if (current.past.length === 0) {
         return current;
@@ -1165,6 +1554,10 @@ function App() {
   }
 
   function goForward() {
+    pendingInteractionRef.current = {
+      name: "historyForward",
+      startedAt: performance.now(),
+    };
     setHistory((current) => {
       if (current.future.length === 0) {
         return current;
@@ -1193,6 +1586,11 @@ function App() {
   }
 
   function toggleEventExpansion(eventId: string) {
+    pendingInteractionRef.current = {
+      name: "toggleEventExpansion",
+      startedAt: performance.now(),
+      detail: { event_id: eventId },
+    };
     setExpandedEventIds((current) =>
       current.includes(eventId)
         ? current.filter((id) => id !== eventId)
@@ -1235,7 +1633,14 @@ function App() {
         <header className="tab-strip">
           <button
             className={activeTab === "markets" ? "tab active-tab" : "tab"}
-            onClick={() => setActiveTab("markets")}
+            onClick={() => {
+              pendingInteractionRef.current = {
+                name: "tabSwitch",
+                startedAt: performance.now(),
+                detail: { tab: "markets" },
+              };
+              setActiveTab("markets");
+            }}
             type="button"
           >
             <span className="tab-title">{tabLabel}</span>
@@ -1243,14 +1648,28 @@ function App() {
           </button>
           <button
             className={activeTab === "positions" ? "tab active-tab" : "tab"}
-            onClick={() => setActiveTab("positions")}
+            onClick={() => {
+              pendingInteractionRef.current = {
+                name: "tabSwitch",
+                startedAt: performance.now(),
+                detail: { tab: "positions" },
+              };
+              setActiveTab("positions");
+            }}
             type="button"
           >
             <span className="tab-title">Positions</span>
           </button>
           <button
             className={activeTab === "watching" ? "tab active-tab" : "tab"}
-            onClick={() => setActiveTab("watching")}
+            onClick={() => {
+              pendingInteractionRef.current = {
+                name: "tabSwitch",
+                startedAt: performance.now(),
+                detail: { tab: "watching" },
+              };
+              setActiveTab("watching");
+            }}
             type="button"
           >
             <span className="tab-title">Watching</span>
@@ -1947,6 +2366,21 @@ function App() {
                   </button>
                 ))}
               </div>
+              {selectedCategoryStatuses.length > 0 ? (
+                <div className="category-status-list">
+                  {selectedCategoryStatuses.map(({ category, detail, status }) => (
+                    <div className="category-status-row" key={category}>
+                      <div className="category-status-copy">
+                        <span className="category-status-name">{category}</span>
+                        <span className="category-status-detail">{detail}</span>
+                      </div>
+                      <span className={`category-status-pill ${status}`}>
+                        {status}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </section>
 
             <section className="filter-section">

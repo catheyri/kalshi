@@ -496,6 +496,70 @@ button {
   gap: 10px;
 }
 
+.category-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.category-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(242, 247, 246, 0.92);
+}
+
+.category-status-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.category-status-name {
+  color: #183441;
+  font-weight: 600;
+}
+
+.category-status-detail {
+  color: #64747f;
+  font-size: 12px;
+}
+
+.category-status-pill {
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.category-status-pill.loading {
+  background: rgba(196, 154, 52, 0.14);
+  color: #8a6414;
+}
+
+.category-status-pill.fresh {
+  background: rgba(46, 110, 97, 0.14);
+  color: #245348;
+}
+
+.category-status-pill.stale {
+  background: rgba(102, 116, 127, 0.14);
+  color: #52616b;
+}
+
+.category-status-pill.pending {
+  background: rgba(92, 106, 118, 0.12);
+  color: #61717b;
+}
+
 .tag-button {
   padding: 8px 11px;
   border-radius: 999px;

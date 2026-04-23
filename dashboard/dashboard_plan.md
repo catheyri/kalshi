@@ -2,7 +2,7 @@
 
 This document breaks the dashboard spec into practical delivery phases.
 
-It is separate from the product spec in [`dashboard.md`](/Users/icathey/Documents/Projects/Kalshi/dashboard.md:1) so we can refine implementation order without muddying the feature definition.
+It is separate from the product spec in [`dashboard.md`](dashboard.md) so we can refine implementation order without muddying the feature definition.
 
 ## Planning Principles
 

@@ -1,31 +1,12 @@
 # kalshi
 
-Minimal local tooling for authenticated Kalshi API calls.
+This repo is now organized like the start of a monorepo.
 
-## Setup
+- `mentions/`: the Python mentions-market engine, its data, tests, examples, and docs
+- `dashboard/`: the Kalshi dashboard tool built with Tauri, Rust, React, and Vite
 
-Store your credentials in [`.env`](/Users/icathey/Documents/Projects/Kalshi/.env:1):
+For the mentions engine, start with [`mentions/README.md`](mentions/README.md).
 
-```env
-KALSHI_ENV=prod
-KALSHI_API_KEY_ID=your-key-id
-KALSHI_PRIVATE_KEY_PATH=/absolute/path/to/private-key.pem
-KALSHI_API_BASE_URL=https://api.elections.kalshi.com/trade-api/v2
-```
+For the dashboard app, see [`dashboard/README.md`](dashboard/README.md).
 
-## Run
-
-Call the authenticated balance endpoint:
-
-```bash
-python3 kalshi_client.py
-```
-
-List your API keys instead:
-
-```bash
-python3 kalshi_client.py api-keys
-```
-
-This script uses OpenSSL locally to generate the RSA-PSS signature Kalshi expects for
-the `KALSHI-ACCESS-SIGNATURE` header.
+Local secrets such as `.env` and `default.txt` remain at the repo root.
