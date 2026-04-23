@@ -4,7 +4,7 @@ import json
 import re
 from html import unescape
 from typing import List, Optional
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import urljoin
 
 from mentions_engine.acquisition.base import AcquisitionResult
 from mentions_engine.config import AppPaths
@@ -24,6 +24,27 @@ class WhiteHouseAcquisition:
         event: Event,
         known_artifacts: List[SourceArtifact],
     ) -> AcquisitionResult:
+        artifacts: List[SourceArtifact] = []
+
+        transcript_artifact = next(
+            (
+                artifact
+                for artifact in known_artifacts
+                if artifact.provider == "whitehouse.gov"
+                and artifact.artifact_type == "official_transcript"
+                and artifact.uri
+            ),
+            None,
+        )
+        if transcript_artifact is not None and transcript_artifact.uri:
+            artifacts.append(
+                self._fetch_official_transcript_artifact(
+                    event_id=event.event_id,
+                    transcript_url=transcript_artifact.uri,
+                    published_at=transcript_artifact.published_at,
+                )
+            )
+
         video_artifact = next(
             (
                 artifact
@@ -32,9 +53,16 @@ class WhiteHouseAcquisition:
             ),
             None,
         )
-        if video_artifact is None or not video_artifact.uri:
-            raise ValueError(f"No fetchable White House video artifact found for {event.event_id}")
-        return self.fetch_event_sources(event.event_id, video_artifact.uri)
+        if video_artifact is not None and video_artifact.uri:
+            result = self.fetch_event_sources(event.event_id, video_artifact.uri)
+            deduped = {artifact.artifact_id: artifact for artifact in artifacts}
+            deduped.update({artifact.artifact_id: artifact for artifact in result.artifacts})
+            return AcquisitionResult(artifacts=list(deduped.values()))
+
+        if artifacts:
+            return AcquisitionResult(artifacts=artifacts)
+
+        raise ValueError(f"No fetchable White House source artifact found for {event.event_id}")
 
     def fetch_event_sources(self, event_id: str, video_page_url: str) -> AcquisitionResult:
         html = self.client.get_text(video_page_url)
@@ -132,22 +160,46 @@ class WhiteHouseAcquisition:
 
         return AcquisitionResult(artifacts=artifacts)
 
+    def _fetch_official_transcript_artifact(
+        self,
+        *,
+        event_id: str,
+        transcript_url: str,
+        published_at: Optional[str],
+    ) -> SourceArtifact:
+        transcript_html = self.client.get_text(transcript_url)
+        transcript_path = self.paths.raw_dir / "whitehouse" / f"{event_id}.transcript.html"
+        transcript_path.write_text(transcript_html, encoding="utf-8")
+        return SourceArtifact(
+            artifact_id=f"artifact-{stable_hash(event_id + ':official-transcript')[:16]}",
+            event_id=event_id,
+            artifact_type="official_transcript",
+            role="settlement_source",
+            provider="whitehouse.gov",
+            uri=transcript_url,
+            local_path=str(transcript_path),
+            captured_at=utc_now_iso(),
+            published_at=published_at,
+            start_time=None,
+            end_time=None,
+            duration_seconds=None,
+            checksum=stable_hash(transcript_html),
+            mime_type="text/html",
+            is_official=True,
+            is_settlement_candidate=True,
+            feed_label="official_transcript_page",
+            feed_priority=None,
+            broadcast_scope="official",
+            language="en",
+            metadata={},
+        )
+
     def _extract_transcript_url(self, html: str, event_id: str) -> Optional[str]:
         title = self._extract_page_title(html)
 
         direct_candidates = self._extract_briefing_links(html, title or event_id)
         if direct_candidates:
             return direct_candidates[0]
-
-        if title:
-            search_candidates = self._search_briefings(title)
-            if search_candidates:
-                return search_candidates[0]
-
-        fallback_query = event_id.replace("whitehouse-", "").replace("-", " ")
-        search_candidates = self._search_briefings(fallback_query)
-        if search_candidates:
-            return search_candidates[0]
 
         return None
 
@@ -185,11 +237,6 @@ class WhiteHouseAcquisition:
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         return [url for _, url in candidates]
-
-    def _search_briefings(self, query: str) -> List[str]:
-        search_url = f"https://www.whitehouse.gov/?s={quote_plus(query)}"
-        html = self.client.get_text(search_url)
-        return self._extract_briefing_links(html, query)
 
     def _extract_youtube_video_id(self, html: str) -> Optional[str]:
         match = re.search(r"https://www\.youtube\.com/embed/([A-Za-z0-9_-]{11})", html)

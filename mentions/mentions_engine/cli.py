@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from mentions_engine.discovery.whitehouse import WhiteHouseDiscovery
 from mentions_engine.config import default_paths
 from mentions_engine.engine import Engine
 from mentions_engine.http import HttpClient
@@ -45,7 +46,8 @@ def main(argv: list[str] | None = None) -> int:
             "ingest-kalshi-category, ingest-whitehouse-mention-market-tickers, "
             "ingest-whitehouse-mention-event-tickers, ingest-whitehouse-mention-category, map-market, "
             "record-outcome, import-outcomes, import-kalshi-outcomes, estimate-market, list-markets, "
-            "list-whitehouse-mention-markets, export-dataset, sync-events, fetch-sources, build-transcript, "
+            "list-whitehouse-mention-markets, backfill-whitehouse-official-transcripts, export-dataset, "
+            "backfill-whitehouse-briefing-videos, sync-events, fetch-sources, build-transcript, "
             "compile-rule, run-rule",
             file=sys.stderr,
         )
@@ -277,6 +279,114 @@ def main(argv: list[str] | None = None) -> int:
                 print(render_whitehouse_mention_market_report(report))
         return 0
 
+    if command == "backfill-whitehouse-official-transcripts":
+        db.initialize()
+        parser = _build_backfill_whitehouse_official_transcripts_parser()
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
+
+        client = HttpClient(allow_insecure_ssl=args.insecure_ssl)
+        discovery = WhiteHouseDiscovery(client=client)
+        result = discovery.discover_official_transcript_events(start_date=args.start_date)
+        events = result.events[: args.limit] if args.limit is not None else result.events
+        artifacts = result.artifacts[: len(events)]
+
+        discovered_event_ids = []
+        for event in events:
+            db.upsert_event(event)
+            discovered_event_ids.append(event.event_id)
+        for artifact in artifacts:
+            db.upsert_source_artifact(artifact)
+
+        fetched_artifacts = 0
+        transcripts_built = 0
+        events_with_transcripts = 0
+
+        for event_id in discovered_event_ids:
+            fetch_result = engine.fetch_sources(event_id)
+            fetched_artifacts += int(fetch_result["artifacts"])
+            built_for_event = 0
+            for row in db.list_artifacts_for_event(event_id):
+                if row["artifact_type"] != "official_transcript" or not row["local_path"]:
+                    continue
+                engine.build_transcript(row["artifact_id"])
+                transcripts_built += 1
+                built_for_event += 1
+            if built_for_event:
+                events_with_transcripts += 1
+
+        payload = {
+            "start_date": args.start_date,
+            "discovered_events": len(discovered_event_ids),
+            "discovered_artifacts": len(artifacts),
+            "fetched_artifacts": fetched_artifacts,
+            "events_with_transcripts": events_with_transcripts,
+            "transcripts_built": transcripts_built,
+            "event_ids": discovered_event_ids,
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if command == "backfill-whitehouse-briefing-videos":
+        db.initialize()
+        parser = _build_backfill_whitehouse_briefing_videos_parser()
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
+
+        client = HttpClient(allow_insecure_ssl=args.insecure_ssl)
+        discovery = WhiteHouseDiscovery(client=client)
+        result = discovery.discover_official_briefing_video_events(start_date=args.start_date)
+        events = result.events[: args.limit] if args.limit is not None else result.events
+        artifacts = result.artifacts[: len(events)]
+
+        discovered_event_ids = []
+        for event in events:
+            db.upsert_event(event)
+            discovered_event_ids.append(event.event_id)
+        for artifact in artifacts:
+            db.upsert_source_artifact(artifact)
+
+        fetched_artifacts = 0
+        transcripts_built = 0
+        official_transcripts_built = 0
+        caption_transcripts_built = 0
+        events_with_text = 0
+
+        for event_id in discovered_event_ids:
+            fetch_result = engine.fetch_sources(event_id)
+            fetched_artifacts += int(fetch_result["artifacts"])
+            built_for_event = 0
+            for row in db.list_artifacts_for_event(event_id):
+                if row["artifact_type"] not in {"official_transcript", "closed_captions"} or not row["local_path"]:
+                    continue
+                engine.build_transcript(row["artifact_id"])
+                transcripts_built += 1
+                built_for_event += 1
+                if row["artifact_type"] == "official_transcript":
+                    official_transcripts_built += 1
+                elif row["artifact_type"] == "closed_captions":
+                    caption_transcripts_built += 1
+            if built_for_event:
+                events_with_text += 1
+
+        payload = {
+            "start_date": args.start_date,
+            "discovered_events": len(discovered_event_ids),
+            "discovered_artifacts": len(artifacts),
+            "fetched_artifacts": fetched_artifacts,
+            "events_with_text": events_with_text,
+            "transcripts_built": transcripts_built,
+            "official_transcripts_built": official_transcripts_built,
+            "caption_transcripts_built": caption_transcripts_built,
+            "event_ids": discovered_event_ids,
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
     if command == "export-dataset":
         db.initialize()
         output_path = None if not argv else Path(argv[0])
@@ -369,6 +479,28 @@ def _build_list_whitehouse_mention_markets_parser() -> argparse.ArgumentParser:
     parser.add_argument("--open-pages", type=int, default=5)
     parser.add_argument("--insecure-ssl", action="store_true")
     parser.add_argument("--json", action="store_true")
+    return parser
+
+
+def _build_backfill_whitehouse_official_transcripts_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m mentions_engine.cli backfill-whitehouse-official-transcripts",
+        description="Backfill official White House press briefing transcripts from whitehouse.gov.",
+    )
+    parser.add_argument("--start-date", default="2025-01-20")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--insecure-ssl", action="store_true")
+    return parser
+
+
+def _build_backfill_whitehouse_briefing_videos_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m mentions_engine.cli backfill-whitehouse-briefing-videos",
+        description="Backfill official White House briefing video pages and any obtainable transcript text.",
+    )
+    parser.add_argument("--start-date", default="2025-01-20")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--insecure-ssl", action="store_true")
     return parser
 
 

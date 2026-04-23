@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import ssl
 import time
 from typing import Dict, Optional
@@ -44,5 +45,30 @@ class HttpClient:
                     continue
                 raise RuntimeError(f"HTTP {exc.code} for {url}") from exc
             except URLError as exc:
+                if attempt < self.max_retries and _is_retryable_transport_error(exc.reason):
+                    time.sleep(float(attempt + 1))
+                    continue
                 raise RuntimeError(f"Request failed for {url}: {exc.reason}") from exc
+            except _RETRYABLE_TRANSPORT_ERRORS as exc:
+                if attempt < self.max_retries:
+                    time.sleep(float(attempt + 1))
+                    continue
+                raise RuntimeError(f"Request failed for {url}: {exc}") from exc
         raise RuntimeError(f"Request failed for {url}")
+
+
+_RETRYABLE_TRANSPORT_ERRORS = (
+    ConnectionResetError,
+    TimeoutError,
+    http.client.IncompleteRead,
+    http.client.RemoteDisconnected,
+    ssl.SSLEOFError,
+)
+
+
+def _is_retryable_transport_error(reason: object) -> bool:
+    if isinstance(reason, _RETRYABLE_TRANSPORT_ERRORS):
+        return True
+    if isinstance(reason, ssl.SSLError):
+        return True
+    return False
