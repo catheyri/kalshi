@@ -9,6 +9,7 @@ class AppPaths:
     root: Path
     data_dir: Path
     raw_dir: Path
+    canonical_dir: Path
     derived_dir: Path
     db_path: Path
 
@@ -19,6 +20,7 @@ class AppPaths:
             root=root,
             data_dir=data_dir,
             raw_dir=data_dir / "raw",
+            canonical_dir=data_dir / "canonical",
             derived_dir=data_dir / "derived",
             db_path=data_dir / "app.db",
         )
@@ -30,7 +32,12 @@ class AppPaths:
             self.raw_dir / "whitehouse",
             self.raw_dir / "rev",
             self.raw_dir / "media",
+            self.canonical_dir,
+            self.canonical_dir / "transcripts",
+            self.canonical_dir / "datasets",
             self.derived_dir,
+            self.derived_dir / "features",
+            self.derived_dir / "datasets",
             self.derived_dir / "transcripts",
             self.derived_dir / "evidence",
         ]:

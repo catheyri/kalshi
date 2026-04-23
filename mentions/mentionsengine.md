@@ -1,10 +1,31 @@
 # Mentions Engine Spec
 
-This document defines the core architecture and product direction for a reusable mentions-market engine.
+This document defines the core architecture and product direction for a reusable prediction engine for Kalshi mention markets.
 
 The goal is to support Kalshi mention markets across multiple event types using one common processing backbone, while allowing different data-acquisition strategies depending on how hard the underlying source data is to obtain.
 
+The primary output of the system is not a transcript verdict on a past event.
+
+The primary output is:
+
+- a list of upcoming or open mention markets
+- a predicted probability that each market resolves `YES`
+- the corresponding fair `YES` and `NO` prices
+- enough supporting context to understand why the model believes that outcome is likely
+
+Transcript parsing and mention-resolution logic still matter, but mainly as research and labeling infrastructure that supports prediction, backtesting, and diagnostics.
+
 ## Product Thesis
+
+Mention markets are prediction problems first and resolution problems second.
+
+To trade them well, we need to answer:
+
+- what future event is this market about?
+- how likely is the target speaker to say the target phrase during that event?
+- how should that likelihood translate into fair Kalshi pricing?
+
+That means the engine has to be centered on future probability estimation, not just post-hoc transcript checking.
 
 Mention markets are not all equally competitive.
 
@@ -14,13 +35,24 @@ This creates a useful strategic framing:
 
 - Easy-transcript markets are useful for early validation.
 - Hard-to-source markets are more likely to offer durable edge.
-- The long-term moat is likely to come more from data acquisition and rules-grade resolution logic than from generic forecasting alone.
+- The long-term moat is likely to come from the combination of:
+  - reliable market-to-event mapping
+  - historical data acquisition
+  - useful predictive features
+  - rules-aware labeling and diagnostics
 
 ## Core View
 
 The same backbone should apply across most mention markets.
 
-Once we have the underlying text or audio, the main engine is broadly the same:
+For trading purposes, the engine should be thought of as four connected systems:
+
+1. Ingest open and upcoming Kalshi markets.
+2. Map each market to the underlying future real-world event.
+3. Build historical datasets from comparable past events and their source material.
+4. Estimate the probability of future mentions and convert that into fair value.
+
+Inside that broader loop, transcript processing still matters:
 
 1. Acquire source data.
 2. Produce or ingest timestamped text.
@@ -28,10 +60,15 @@ Once we have the underlying text or audio, the main engine is broadly the same:
 4. Attribute words to the correct speaker or feed when required.
 5. Compile Kalshi market rules into machine-checkable criteria.
 6. Detect mentions that satisfy those criteria.
-7. Estimate the probability of future mentions and convert that into fair value.
-8. Compare fair value to the market and support execution.
 
-The event-specific differences mostly live in the ingestion layer. The rest should be designed as a shared engine.
+But those steps are best viewed as support infrastructure for:
+
+7. training data construction
+8. feature extraction
+9. backtesting and diagnostics
+10. live probability estimation and opportunity ranking
+
+The event-specific differences mostly live in ingestion and event mapping. The downstream prediction and ranking flow should be shared.
 
 ## Strategic Implications
 
@@ -478,18 +515,66 @@ This is the current source inventory referenced above.
 
 The engine should:
 
+- ingest open and upcoming Kalshi mention markets
+- map markets to the real-world future events they depend on
+- estimate the probability that each market resolves `YES` or `NO`
+- convert probability estimates into fair prices and ranked opportunities
 - support multiple market types through one common pipeline
 - separate acquisition from downstream text and pricing logic
-- retain enough metadata to reproduce why a mention was or was not counted
-- preserve links between detection output and the original source evidence
+- retain enough metadata to explain both predictions and historical labels
+- preserve links between historical detection output and the original source evidence
 - be designed around Kalshi rules, not just generic phrase search
 - support both historical research and live decision-making
 
+Important framing:
+
+- post-event mention detection is not the final product
+- post-event mention detection is a supporting subsystem for research, backtesting, and debugging
+- Kalshi resolution outcomes are the ground truth that matter most for trading performance
+
 ## Architecture
 
-### Layer 1: Source Ingestion
+The architecture should be prediction-first.
 
-This layer acquires raw event data.
+The cleanest mental model is:
+
+1. market intake
+2. event mapping
+3. historical research and labeling
+4. feature extraction
+5. probability estimation
+6. opportunity scoring
+7. optional post-event diagnostics and review
+
+### Layer 1: Market Intake
+
+This layer acquires Kalshi market data for mention contracts that are currently open or upcoming.
+
+Responsibilities:
+
+- fetch market metadata and prices
+- store rules text and source text
+- identify market status, close time, liquidity, and price state
+- normalize market objects into a canonical `Market` model
+
+This is the starting point for the actual trading workflow.
+
+### Layer 2: Event Mapping
+
+This layer links each Kalshi market to the future real-world event it depends on.
+
+Responsibilities:
+
+- identify the relevant event family
+- determine the specific upcoming event
+- attach participants, schedule, venue, and source expectations
+- store event metadata in a canonical `Event` model
+
+This layer is important because prediction is impossible unless the market is correctly mapped to the real thing that has not happened yet.
+
+### Layer 3: Source Ingestion
+
+This layer acquires historical or live source data for events.
 
 Its job is to hide source-specific complexity behind a common interface.
 
@@ -517,7 +602,7 @@ The engine must distinguish between:
 
 These may be the same, but they cannot be assumed to be the same.
 
-### Layer 2: Transcription
+### Layer 4: Transcription
 
 This layer converts audio into timestamped text when no transcript is directly available or when independent verification is preferred.
 
@@ -530,7 +615,7 @@ Responsibilities:
 
 For sports and other hard-feed markets, this layer is central.
 
-### Layer 3: Normalization
+### Layer 5: Normalization
 
 This layer converts raw transcript text into a rules-friendly format.
 
@@ -545,7 +630,7 @@ Responsibilities:
 
 This layer is reusable across nearly all mention markets.
 
-### Layer 4: Speaker Attribution
+### Layer 6: Speaker Attribution
 
 This layer determines who said the relevant words.
 
@@ -558,7 +643,7 @@ Responsibilities:
 
 This is much more important and much harder in sports and broadcast markets than in single-speaker official transcript markets.
 
-### Layer 5: Rule Compiler
+### Layer 7: Rule Compiler
 
 This layer translates Kalshi market rules into structured logic.
 
@@ -585,7 +670,7 @@ Example rule fields:
 - `feed_scope`
 - `counting_exclusions`
 
-### Layer 6: Mention Matcher
+### Layer 8: Mention Matcher
 
 This layer decides whether an observed utterance qualifies under compiled rules.
 
@@ -607,7 +692,33 @@ Output should include:
 - source artifact reference
 - explanation of rule satisfaction or failure
 
-### Layer 7: Pricing Model
+Important framing:
+
+This layer is mainly for:
+
+- historical label construction
+- feature generation
+- debugging surprising outcomes
+- investigating disagreement between our model and Kalshi
+
+It is not the main user-facing output of the system.
+
+### Layer 9: Feature Extraction
+
+This layer converts market, event, transcript, and historical context into model inputs.
+
+Responsibilities:
+
+- build phrase-history features
+- build speaker-history features
+- build event-family priors
+- build topic/context features
+- build recency and schedule features
+- build market microstructure features where useful
+
+This is the bridge between raw research data and probability estimation.
+
+### Layer 10: Pricing Model
 
 This layer estimates the probability of future mentions.
 
@@ -621,7 +732,7 @@ Responsibilities:
 
 The exact model can evolve, but it should plug into the same downstream interface regardless of event type.
 
-### Layer 8: Execution Layer
+### Layer 11: Opportunity Scoring / Execution Layer
 
 This layer compares fair value to market price and supports trading workflows.
 
@@ -660,18 +771,23 @@ The sports system should therefore be designed for evidence preservation and hum
 ## Design Principles
 
 - Build one reusable engine, not separate tools for each market type.
+- Treat future probability estimation as the primary product output.
 - Keep ingestion adapters market-specific and everything downstream as shared as possible.
 - Preserve source evidence at every stage.
 - Treat Kalshi rules as first-class structured inputs.
 - Favor auditability over black-box outputs.
 - Separate research quality from settlement quality.
+- Use Kalshi resolution outcomes as the ultimate backtesting target whenever available.
+- Treat transcript matching as a supporting tool for labels, features, and diagnostics rather than the final truth.
 
 ## Phased Build Plan
 
-### Phase 1: Core Backbone
+### Phase 1: Market + Data Backbone
 
-Build the common pipeline:
+Build the common trading-research backbone:
 
+- Kalshi market ingestion
+- market-to-event mapping
 - source abstraction
 - transcript ingestion
 - normalization
@@ -679,9 +795,29 @@ Build the common pipeline:
 - mention matcher
 - evidence model
 
-This phase should be validated on easy transcript-rich events.
+This phase should be validated on an easy transcript-rich vertical.
 
-### Phase 2: Replay Audio Workflow
+The first fully developed vertical should be White House press briefings because:
+
+- events are frequent
+- transcripts are often readily available
+- the event family is easy to map
+- it gives us repeated historical data quickly
+
+### Phase 2: Historical Prediction Layer
+
+Add prediction-oriented research tooling:
+
+- historical resolved market collection
+- comparable-event dataset construction
+- phrase and topic history features
+- speaker-specific priors
+- first probability model
+- first fair-value and opportunity outputs
+
+This is the phase where the engine becomes meaningfully useful for trading.
+
+### Phase 3: Replay Audio Workflow
 
 Add replay-based transcription:
 
@@ -691,17 +827,6 @@ Add replay-based transcription:
 - phrase detection against compiled rules
 
 This phase should be validated on earnings calls and similar events.
-
-### Phase 3: Historical Pricing Layer
-
-Add research and pricing:
-
-- phrase frequency database
-- event-type priors
-- speaker-specific priors
-- fair-value estimation
-
-This turns the engine from a resolver into a trading tool.
 
 ### Phase 4: Feed-Capture Module
 
@@ -726,14 +851,26 @@ This phase is especially relevant for sports announcer markets.
 
 The right approach is not to build a separate tool for each mention-market category.
 
-The right approach is to build a universal mentions engine with:
+The right approach is to build a universal prediction engine for mention markets with:
 
+- one market-ingestion layer
+- one event-mapping layer
 - interchangeable ingestion modules
+- one shared historical research pipeline
 - one shared normalization and rules pipeline
-- one shared mention-detection core
+- one shared feature-extraction layer
 - one shared pricing interface
+- one shared opportunity-ranking layer
 
 Easy-transcript markets should be used to validate the engine quickly.
+
+The first fully developed vertical should be White House briefings, not because they are the ultimate end state, but because they are a practical way to build:
+
+- event mapping
+- historical data collection
+- transcript labeling
+- early predictive features
+- initial backtests
 
 Hard-feed markets, especially sports, are likely where the strongest long-term edge may exist if the acquisition and rules-resolution problems can be solved reliably.
 
@@ -745,9 +882,53 @@ The goal is not to design the final perfect ingestion stack immediately.
 
 The goal is to define the first workable, lawful, testable path for:
 
-- one sports workflow with complex feed selection
-- one sports workflow with cleaner national broadcast sourcing
-- one non-sports workflow with replay audio and strong transcript potential
+- one easy transcript-first workflow for fast prediction-system validation
+- one non-sports replay workflow with moderate acquisition complexity
+- one sports workflow for eventual hard-feed expansion
+
+### MVP Plan: White House Press Briefings
+
+Target use case:
+
+- Kalshi markets about whether Karoline Leavitt or another briefing speaker will mention a target phrase in an upcoming briefing
+
+Objective:
+
+- prove that we can map upcoming markets to future briefings, build a reusable historical dataset, and estimate mention probabilities before the briefing happens
+
+Why this is first:
+
+- briefings occur frequently
+- transcripts are often readily available
+- the event family is narrow enough to model cleanly
+- repeated historical examples should accumulate quickly
+
+Acquisition steps:
+
+1. ingest relevant Kalshi markets
+2. map each market to the corresponding future briefing event
+3. backfill historical White House briefings
+4. fetch official transcript pages and video pages where available
+5. normalize transcript segments and speaker labels
+6. compile market rules into structured criteria
+7. build historical labels and features from past briefings
+8. estimate the probability that the target phrase is mentioned in the upcoming briefing
+
+First milestone:
+
+- one working ranked list of upcoming White House mention markets with predicted `YES` probabilities and fair values
+
+Key risks:
+
+- upcoming briefing schedules may not always be known far in advance
+- topic context may shift quickly based on current events
+- some markets may depend on subtle phrasing distinctions not captured by naive features
+
+Fallbacks:
+
+- begin with a narrow phrase family set
+- use simple historical frequency and recency baselines before more advanced modeling
+- use transcript matching primarily as a feature and research tool, then compare against real Kalshi outcomes
 
 ### MVP Plan: MLB.TV
 
@@ -880,19 +1061,22 @@ Fallbacks:
 
 | Workflow | Difficulty | Source clarity | Feed complexity | Data edge potential | Best use |
 |---|---|---|---|---|---|
-| `Earnings calls` | `Low-Medium` | `High` | `Low` | `Medium` | validate the core engine |
+| `White House briefings` | `Low` | `High` | `Low` | `Low-Medium` | validate market mapping, historical labeling, and first prediction models |
+| `Earnings calls` | `Low-Medium` | `High` | `Low` | `Medium` | validate replay-plus-transcription expansion |
 | `NBA playoffs` | `Medium` | `High` | `Medium` | `Medium-High` | first national-broadcast sports workflow |
 | `MLB.TV` | `High` | `Medium` | `High` | `High` | first high-edge sports workflow |
 
 ## Recommended MVP Order
 
-1. `Earnings calls`
-2. `NBA playoffs`
-3. `MLB.TV`
+1. `White House briefings`
+2. `Earnings calls`
+3. `NBA playoffs`
+4. `MLB.TV`
 
 Rationale:
 
-- earnings calls are the cleanest way to validate ingestion, transcription, rule compilation, and mention matching
+- White House briefings are the fastest way to validate end-to-end prediction workflow on a frequent transcript-rich vertical
+- earnings calls are the cleanest replay-audio expansion after the first vertical works
 - NBA playoffs are the cleanest sports proving ground because the broadcasts are mostly national and feed selection is simpler
 - MLB is likely the most strategically valuable early sports category, but only after the acquisition stack is proven on something less operationally messy
 
@@ -1309,6 +1493,35 @@ The engine should be built around clear interfaces between layers.
 
 These interfaces should allow the same downstream machinery to work regardless of whether the source is an official transcript, a replay file, or a captured sports broadcast.
 
+### Market Intake Interface
+
+Purpose:
+
+- fetch open or upcoming Kalshi mention markets and normalize them into canonical market objects
+
+Suggested contract:
+
+```ts
+interface MarketIngestor {
+  name: string;
+  fetchOpenMarkets(): Promise<Market[]>;
+}
+```
+
+### Event Mapping Interface
+
+Purpose:
+
+- map a Kalshi market to the future real-world event it depends on
+
+Suggested contract:
+
+```ts
+interface EventMapper {
+  map(market: Market): Promise<Event | null>;
+}
+```
+
 ### Source Adapter Interface
 
 Purpose:
@@ -1456,7 +1669,7 @@ interface EvidenceBuilder {
 
 Purpose:
 
-- derive model features from event context, transcript history, and source metadata
+- derive model features from market context, event context, transcript history, and source metadata
 
 Suggested contract:
 
@@ -1506,6 +1719,18 @@ interface OpportunityScorer {
 
 The storage layer should separate durable entities from derived outputs.
 
+The cleanest operational split is:
+
+- `raw/`: original fetched artifacts and downloaded source files
+- `canonical/`: normalized, speaker-attributed, reusable core entities derived from raw inputs
+- `derived/`: rebuildable features, exports, cached model-ready datasets, estimates, and scores
+
+Important rule:
+
+- raw and canonical transcript data are durable assets
+- feature tables and model-ready datasets are cached views that can be recomputed
+- we should never throw away canonical transcript text just because we extracted metadata from it
+
 ### Durable Entities
 
 These should usually be stored permanently:
@@ -1518,6 +1743,17 @@ These should usually be stored permanently:
 - speakers
 - compiled rules
 - price snapshots
+- market outcomes
+
+Durable transcript storage should preserve:
+
+- original transcript payloads where available
+- normalized transcript text
+- speaker-attributed segments
+- timestamps and confidence where available
+- provenance back to the source artifact
+
+This is what lets us re-run new feature extraction logic later without losing information.
 
 ### Derived Entities
 
@@ -1528,6 +1764,8 @@ These may be recomputed but should still be stored for audit and backtesting:
 - evidence bundles
 - probability estimates
 - opportunities
+- model-ready dataset exports
+- cached feature tables
 
 ## Live vs Historical Modes
 
@@ -1537,10 +1775,12 @@ The same engine should support both historical research and live operation.
 
 Use cases:
 
-- build datasets
-- backtest mention detection
+- build datasets for comparable past events
+- backtest prediction quality against actual Kalshi resolutions
+- backtest feature sets and pricing models
+- improve event mapping and rule templates
+- investigate why past markets resolved the way they did
 - backtest pricing
-- improve rule templates
 
 Historical mode emphasizes completeness and reproducibility.
 
@@ -1548,12 +1788,13 @@ Historical mode emphasizes completeness and reproducibility.
 
 Use cases:
 
-- ingest active event data
-- surface potential mentions during the event
-- update mention probabilities as the event evolves
+- ingest active and upcoming mention markets
+- map them to future events
+- estimate `YES` probabilities before the event starts
+- update mention probabilities as new context arrives
 - rank opportunities for action
 
-Live mode emphasizes latency, confidence scoring, and review workflows.
+Live mode emphasizes useful forecasts, confidence scoring, and opportunity ranking.
 
 ## Review Workflow
 
@@ -1583,6 +1824,18 @@ The review UI or downstream review system should show:
 - matched phrase
 - compiled rule summary
 - explanation of why the engine was uncertain
+
+But review is a supporting workflow, not the main product surface.
+
+The main product surface should show:
+
+- open and upcoming markets
+- predicted `YES` probability
+- fair value
+- current market price
+- edge
+- uncertainty
+- key feature drivers
 
 ## Notes On Sports And Non-Sports Scope
 

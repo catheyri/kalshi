@@ -4,13 +4,28 @@ import json
 import sys
 from pathlib import Path
 
-from mentions_engine.acquisition import WhiteHouseAcquisition
 from mentions_engine.config import default_paths
-from mentions_engine.discovery import WhiteHouseDiscovery
-from mentions_engine.matcher import build_evidence, find_candidates, make_decisions
-from mentions_engine.rules import compile_rule_from_json
+from mentions_engine.engine import Engine
+from mentions_engine.kalshi import KalshiPublicClient
+from mentions_engine.market_analysis import WhiteHouseMentionMarketParser
+from mentions_engine.market_ingest import JsonFileMarketIngestor
+from mentions_engine.market_ingest import (
+    KalshiCategoryMarketIngestor,
+    KalshiEventTickerIngestor,
+    KalshiMarketTickerIngestor,
+)
+from mentions_engine.outcomes import JsonFileOutcomeImporter, KalshiMarketOutcomeImporter
+from mentions_engine.registry import (
+    acquisition_adapters,
+    discovery_adapters,
+    event_mappers,
+    feature_extractor,
+    opportunity_scorer,
+    pricing_model,
+    transcript_builders,
+)
+from mentions_engine.rules import compile_bundle_from_json
 from mentions_engine.storage import Database
-from mentions_engine.transcripts import parse_official_whitehouse_transcript, parse_youtube_captions
 from mentions_engine.utils import dump_json
 
 
@@ -19,7 +34,11 @@ def main(argv: list[str] | None = None) -> int:
     if not argv:
         print(
             "Usage: python3 -m mentions_engine.cli <command> [args]\n"
-            "Commands: init-db, sync-whitehouse, fetch-whitehouse-sources, build-transcript, compile-rule, run-rule",
+            "Commands: init-db, ingest-markets, ingest-kalshi-market-tickers, ingest-kalshi-event-tickers, "
+            "ingest-kalshi-category, ingest-whitehouse-mention-market-tickers, "
+            "ingest-whitehouse-mention-event-tickers, ingest-whitehouse-mention-category, map-market, "
+            "record-outcome, import-outcomes, import-kalshi-outcomes, estimate-market, list-markets, export-dataset, sync-events, fetch-sources, build-transcript, "
+            "compile-rule, run-rule",
             file=sys.stderr,
         )
         return 1
@@ -28,39 +47,176 @@ def main(argv: list[str] | None = None) -> int:
     paths = default_paths()
     paths.ensure()
     db = Database(paths.db_path)
+    engine = Engine(
+        paths=paths,
+        db=db,
+        discovery_adapters=discovery_adapters(),
+        acquisition_adapters=acquisition_adapters(paths),
+        transcript_builders=transcript_builders(),
+        event_mappers=event_mappers(),
+        feature_extractor=feature_extractor(db),
+        pricing_model=pricing_model(),
+        opportunity_scorer=opportunity_scorer(),
+    )
 
     if command == "init-db":
         db.initialize()
         print(paths.db_path)
         return 0
 
-    if command == "sync-whitehouse":
-        db.initialize()
-        discovery = WhiteHouseDiscovery()
-        result = discovery.discover_press_briefings()
-        for event in result.events:
-            db.upsert_event(event)
-        for artifact in result.artifacts:
-            db.upsert_source_artifact(artifact)
-        print(json.dumps({"events": len(result.events), "artifacts": len(result.artifacts)}, indent=2))
-        return 0
-
-    if command == "fetch-whitehouse-sources":
+    if command == "ingest-markets":
         db.initialize()
         if not argv:
-            print("fetch-whitehouse-sources requires <event_id>", file=sys.stderr)
+            print("ingest-markets requires <markets_json_path>", file=sys.stderr)
+            return 1
+        ingestor = JsonFileMarketIngestor(Path(argv[0]))
+        print(json.dumps(engine.ingest_markets(ingestor), indent=2))
+        return 0
+
+    if command == "ingest-kalshi-market-tickers":
+        db.initialize()
+        if not argv:
+            print("ingest-kalshi-market-tickers requires <ticker> [ticker...]", file=sys.stderr)
+            return 1
+        ingestor = KalshiMarketTickerIngestor(argv, KalshiPublicClient())
+        print(json.dumps(engine.ingest_markets(ingestor), indent=2))
+        return 0
+
+    if command == "ingest-kalshi-event-tickers":
+        db.initialize()
+        if not argv:
+            print("ingest-kalshi-event-tickers requires <event_ticker> [event_ticker...]", file=sys.stderr)
+            return 1
+        ingestor = KalshiEventTickerIngestor(argv, KalshiPublicClient())
+        print(json.dumps(engine.ingest_markets(ingestor), indent=2))
+        return 0
+
+    if command == "ingest-kalshi-category":
+        db.initialize()
+        if not argv:
+            print("ingest-kalshi-category requires <category> [max_pages]", file=sys.stderr)
+            return 1
+        category = argv[0]
+        max_pages = int(argv[1]) if len(argv) > 1 else 1
+        ingestor = KalshiCategoryMarketIngestor(category, KalshiPublicClient(), max_pages=max_pages)
+        print(json.dumps(engine.ingest_markets(ingestor), indent=2))
+        return 0
+
+    if command == "ingest-whitehouse-mention-market-tickers":
+        db.initialize()
+        if not argv:
+            print("ingest-whitehouse-mention-market-tickers requires <ticker> [ticker...]", file=sys.stderr)
+            return 1
+        ingestor = KalshiMarketTickerIngestor(
+            argv,
+            KalshiPublicClient(),
+            parser=WhiteHouseMentionMarketParser(),
+        )
+        print(json.dumps(engine.ingest_markets(ingestor), indent=2))
+        return 0
+
+    if command == "ingest-whitehouse-mention-event-tickers":
+        db.initialize()
+        if not argv:
+            print("ingest-whitehouse-mention-event-tickers requires <event_ticker> [event_ticker...]", file=sys.stderr)
+            return 1
+        ingestor = KalshiEventTickerIngestor(
+            argv,
+            KalshiPublicClient(),
+            parser=WhiteHouseMentionMarketParser(),
+        )
+        print(json.dumps(engine.ingest_markets(ingestor), indent=2))
+        return 0
+
+    if command == "ingest-whitehouse-mention-category":
+        db.initialize()
+        category = argv[0] if argv else "Government"
+        max_pages = int(argv[1]) if len(argv) > 1 else 1
+        ingestor = KalshiCategoryMarketIngestor(
+            category,
+            KalshiPublicClient(),
+            max_pages=max_pages,
+            parser=WhiteHouseMentionMarketParser(),
+        )
+        print(json.dumps(engine.ingest_markets(ingestor), indent=2))
+        return 0
+
+    if command == "map-market":
+        db.initialize()
+        if not argv:
+            print("map-market requires <market_id>", file=sys.stderr)
+            return 1
+        print(json.dumps(engine.map_market(argv[0]), indent=2))
+        return 0
+
+    if command == "record-outcome":
+        db.initialize()
+        if len(argv) < 2:
+            print("record-outcome requires <market_id> <yes|no>", file=sys.stderr)
+            return 1
+        market_id, outcome_text = argv[:2]
+        if outcome_text not in {"yes", "no"}:
+            print("record-outcome outcome must be 'yes' or 'no'", file=sys.stderr)
+            return 1
+        outcome = engine.record_market_outcome(market_id, resolved_yes=outcome_text == "yes")
+        print(json.dumps(outcome.to_dict(), indent=2))
+        return 0
+
+    if command == "import-outcomes":
+        db.initialize()
+        if not argv:
+            print("import-outcomes requires <outcomes_json_path>", file=sys.stderr)
+            return 1
+        importer = JsonFileOutcomeImporter(Path(argv[0]))
+        print(json.dumps(engine.import_outcomes(importer), indent=2))
+        return 0
+
+    if command == "import-kalshi-outcomes":
+        db.initialize()
+        if not argv:
+            print("import-kalshi-outcomes requires <ticker> [ticker...]", file=sys.stderr)
+            return 1
+        importer = KalshiMarketOutcomeImporter(argv, KalshiPublicClient())
+        print(json.dumps(engine.import_outcomes(importer), indent=2))
+        return 0
+
+    if command == "estimate-market":
+        db.initialize()
+        if not argv:
+            print("estimate-market requires <market_id>", file=sys.stderr)
+            return 1
+        print(json.dumps(engine.estimate_market(argv[0]), indent=2))
+        return 0
+
+    if command == "list-markets":
+        db.initialize()
+        status = argv[0] if argv else None
+        print(json.dumps(engine.list_markets_with_latest_estimates(status=status), indent=2))
+        return 0
+
+    if command == "export-dataset":
+        db.initialize()
+        output_path = None if not argv else Path(argv[0])
+        status = argv[1] if len(argv) > 1 else None
+        print(json.dumps(engine.export_market_dataset(output_path, status=status), indent=2))
+        return 0
+
+    if command in {"sync-events", "sync-whitehouse"}:
+        db.initialize()
+        adapter_name = argv[0] if argv else ("whitehouse" if command == "sync-whitehouse" else None)
+        if not adapter_name:
+            print("sync-events requires <adapter_name>", file=sys.stderr)
+            return 1
+        print(json.dumps(engine.sync_events(adapter_name), indent=2))
+        return 0
+
+    if command in {"fetch-sources", "fetch-whitehouse-sources"}:
+        db.initialize()
+        if not argv:
+            print(f"{command} requires <event_id>", file=sys.stderr)
             return 1
         event_id = argv.pop(0)
-        artifacts = db.list_artifacts_for_event(event_id)
-        video_artifact = next((row for row in artifacts if row["provider"] == "whitehouse.gov"), None)
-        if video_artifact is None or not video_artifact["uri"]:
-            print(f"No White House video artifact found for {event_id}", file=sys.stderr)
-            return 1
-        acquisition = WhiteHouseAcquisition(paths)
-        result = acquisition.fetch_event_sources(event_id, video_artifact["uri"])
-        for artifact in result.artifacts:
-            db.upsert_source_artifact(artifact)
-        print(json.dumps({"event_id": event_id, "artifacts": len(result.artifacts)}, indent=2))
+        print(json.dumps(engine.fetch_sources(event_id), indent=2))
         return 0
 
     if command == "build-transcript":
@@ -69,33 +225,7 @@ def main(argv: list[str] | None = None) -> int:
             print("build-transcript requires <artifact_id>", file=sys.stderr)
             return 1
         artifact_id = argv.pop(0)
-        artifact = db.get_artifact(artifact_id)
-        if artifact is None:
-            print(f"Artifact not found: {artifact_id}", file=sys.stderr)
-            return 1
-        local_path = artifact["local_path"]
-        if not local_path:
-            print(f"Artifact has no local_path: {artifact_id}", file=sys.stderr)
-            return 1
-        html = Path(local_path).read_text(encoding="utf-8")
-        if artifact["artifact_type"] == "official_transcript":
-            transcript, segments = parse_official_whitehouse_transcript(artifact_id, html)
-        elif artifact["artifact_type"] == "closed_captions":
-            transcript, segments = parse_youtube_captions(artifact_id, html)
-        else:
-            print(f"Unsupported artifact_type for transcript building: {artifact['artifact_type']}", file=sys.stderr)
-            return 1
-        db.upsert_transcript(transcript)
-        db.replace_segments(transcript.transcript_id, segments)
-        print(
-            json.dumps(
-                {
-                    "transcript_id": transcript.transcript_id,
-                    "segments": len(segments),
-                },
-                indent=2,
-            )
-        )
+        print(json.dumps(engine.build_transcript(artifact_id), indent=2))
         return 0
 
     if command == "compile-rule":
@@ -106,9 +236,12 @@ def main(argv: list[str] | None = None) -> int:
         rule_path = Path(argv[0])
         output_path = Path(argv[1])
         payload = json.loads(rule_path.read_text(encoding="utf-8"))
-        rule = compile_rule_from_json(payload)
-        db.upsert_compiled_rule(rule)
-        dump_json(output_path, rule.to_dict())
+        rule, market = compile_bundle_from_json(payload)
+        engine.compile_rule(rule, market)
+        output_payload = {"compiled_rule": rule.to_dict()}
+        if market is not None:
+            output_payload["market"] = market.to_dict()
+        dump_json(output_path, output_payload)
         print(output_path)
         return 0
 
@@ -118,42 +251,18 @@ def main(argv: list[str] | None = None) -> int:
             print("run-rule requires <event_id> <artifact_id> <transcript_id> <rule_json_path>", file=sys.stderr)
             return 1
         event_id, artifact_id, transcript_id, rule_path = argv[:4]
-        transcript = db.get_transcript(transcript_id)
-        artifact = db.get_artifact(artifact_id)
-        if transcript is None or artifact is None:
-            print("Artifact or transcript not found", file=sys.stderr)
-            return 1
-        segments = db.list_segments(transcript_id)
         rule_payload = json.loads(Path(rule_path).read_text(encoding="utf-8"))
-        rule = compile_rule_from_json(rule_payload)
-        candidates = find_candidates(
-            market_id=rule.market_id,
-            rule=rule,
-            event_id=event_id,
-            transcript_id=transcript_id,
-            segments=[
-                _segment_from_row(row)
-                for row in segments
-            ],
-        )
-        decisions = make_decisions(candidates)
-        evidence = [
-            build_evidence(
-                artifact_id=artifact_id,
-                transcript_id=transcript_id,
-                segments=[_segment_from_row(row) for row in segments],
-                candidate=candidate,
-                decision=decision,
-            ).to_dict()
-            for candidate, decision in zip(candidates, decisions)
-        ]
+        rule, market = compile_bundle_from_json(rule_payload)
+        engine.compile_rule(rule, market)
         print(
             json.dumps(
-                {
-                    "candidates": [candidate.to_dict() for candidate in candidates],
-                    "decisions": [decision.to_dict() for decision in decisions],
-                    "evidence": evidence,
-                },
+                engine.run_rule(
+                    event_id=event_id,
+                    artifact_id=artifact_id,
+                    transcript_id=transcript_id,
+                    rule=rule,
+                    persist=True,
+                ),
                 indent=2,
             )
         )
@@ -161,25 +270,6 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Unknown command: {command}", file=sys.stderr)
     return 1
-
-
-def _segment_from_row(row):
-    from mentions_engine.models import TranscriptSegment
-
-    return TranscriptSegment(
-        segment_id=row["segment_id"],
-        transcript_id=row["transcript_id"],
-        start_time_seconds=row["start_time_seconds"],
-        end_time_seconds=row["end_time_seconds"],
-        speaker_id=row["speaker_id"],
-        speaker_label=row["speaker_label"],
-        channel=row["channel"],
-        text=row["text"],
-        normalized_text=row["normalized_text"],
-        confidence=row["confidence"],
-        word_count=row["word_count"],
-        metadata=json.loads(row["metadata_json"]),
-    )
 
 
 if __name__ == "__main__":

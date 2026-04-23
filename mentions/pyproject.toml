@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mentions-engine"
 version = "0.1.0"
-description = "Transcript-first tooling for Kalshi mention-market research"
+description = "Prediction-oriented tooling for Kalshi mention markets"
 requires-python = ">=3.9"
 dependencies = [
   "youtube-transcript-api>=1.2.4",
@@ -21,4 +21,9 @@ packages = [
   "mentions_engine.transcripts",
   "mentions_engine.rules",
   "mentions_engine.matcher",
+  "mentions_engine.market_ingest",
+  "mentions_engine.market_analysis",
+  "mentions_engine.event_mapping",
+  "mentions_engine.outcomes",
+  "mentions_engine.prediction",
 ]

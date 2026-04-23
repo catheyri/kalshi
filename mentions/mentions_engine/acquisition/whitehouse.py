@@ -2,26 +2,39 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from html import unescape
 from typing import List, Optional
 from urllib.parse import quote_plus, urljoin
 
+from mentions_engine.acquisition.base import AcquisitionResult
 from mentions_engine.config import AppPaths
 from mentions_engine.http import HttpClient
-from mentions_engine.models import SourceArtifact
+from mentions_engine.models import Event, SourceArtifact
 from mentions_engine.utils import normalize_text, stable_hash, utc_now_iso
 
-
-@dataclass
-class AcquisitionResult:
-    artifacts: List[SourceArtifact]
-
-
 class WhiteHouseAcquisition:
+    event_type = "white_house_press_briefing"
+
     def __init__(self, paths: AppPaths, client: Optional[HttpClient] = None):
         self.paths = paths
         self.client = client or HttpClient()
+
+    def fetch_sources(
+        self,
+        event: Event,
+        known_artifacts: List[SourceArtifact],
+    ) -> AcquisitionResult:
+        video_artifact = next(
+            (
+                artifact
+                for artifact in known_artifacts
+                if artifact.provider == "whitehouse.gov" and artifact.artifact_type == "video_replay" and artifact.uri
+            ),
+            None,
+        )
+        if video_artifact is None or not video_artifact.uri:
+            raise ValueError(f"No fetchable White House video artifact found for {event.event_id}")
+        return self.fetch_event_sources(event.event_id, video_artifact.uri)
 
     def fetch_event_sources(self, event_id: str, video_page_url: str) -> AcquisitionResult:
         html = self.client.get_text(video_page_url)

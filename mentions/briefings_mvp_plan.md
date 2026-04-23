@@ -9,7 +9,7 @@ The immediate target is Karoline Leavitt press briefings because they are:
 - often available as official video and sometimes official transcript
 - likely to have enough historical material to validate the pipeline
 
-This is intentionally a transcript-first MVP, not a special-purpose one-off tool.
+This is intentionally a transcript-first first vertical, not a special-purpose one-off tool.
 
 The implementation should follow the generalized architecture described in [mentionsengine.md](mentionsengine.md) and should be designed so that the same code can later support:
 
@@ -29,12 +29,13 @@ Build a working end-to-end system that can:
 3. produce normalized, timestamp-aware text
 4. compile mention-market rules into structured criteria
 5. detect candidate mentions
-6. adjudicate whether they count under the rules
+6. use those historical materials to build labels and predictive features
 7. emit auditable evidence bundles
+8. support probability estimates for upcoming briefing markets
 
 The MVP does not need to place trades or produce a sophisticated forecasting model.
 
-It should first prove that we can build the reusable mention-resolution backbone cleanly.
+It should first prove that we can build the reusable research and prediction backbone cleanly on one narrow event family.
 
 ## Why This Event Type Is A Good Starting Point
 
@@ -61,7 +62,7 @@ That makes this a strong source family for building:
 
 ## Product Framing
 
-The MVP should be framed as a `mention-resolution and data-prep engine`, not yet as a full trading system.
+The MVP should be framed as a `prediction-oriented research and data-prep engine`, not yet as a full trading system.
 
 The output we want at the end of the first milestone is:
 
@@ -69,14 +70,14 @@ The output we want at the end of the first milestone is:
 - structured source artifacts
 - transcripts and transcript segments
 - compiled rules
-- candidate mentions
-- final mention decisions
-- evidence bundles
+- historical mention labels and evidence bundles
+- comparable-event features
+- initial probability estimates for upcoming briefing markets
 
 If that works well, we can later add:
 
-- historical phrase frequency features
-- fair-value estimation
+- richer phrase frequency features
+- stronger fair-value estimation
 - opportunity scoring
 
 ## Scope
@@ -705,6 +706,21 @@ The following live workflow has been validated:
 6. run a mention rule against the transcript
 7. emit candidates, decisions, and evidence with timestamps
 
+The prediction-oriented workflow that the project is moving toward is:
+
+1. ingest open or upcoming briefing markets
+2. map each market to the future briefing event
+3. backfill comparable historical briefings
+4. record real market outcomes when available
+5. estimate `YES` probability and fair value for open markets
+
+Storage principle:
+
+- keep fetched source files in `data/raw/`
+- keep normalized speaker-attributed transcripts in `data/canonical/`
+- keep feature tables and model-ready exports in `data/derived/`
+- never discard canonical transcript text after feature extraction
+
 Validated on:
 
 - `whitehouse-press-secretary-karoline-leavitt-briefs-members-of-the-media-mar-30-2026`
@@ -721,8 +737,21 @@ These commands are working:
 ```bash
 cd mentions
 python3 -m mentions_engine.cli init-db
-python3 -m mentions_engine.cli sync-whitehouse
-python3 -m mentions_engine.cli fetch-whitehouse-sources <event_id>
+python3 -m mentions_engine.cli ingest-markets <markets_json_path>
+python3 -m mentions_engine.cli ingest-kalshi-market-tickers <ticker> [ticker...]
+python3 -m mentions_engine.cli ingest-kalshi-event-tickers <event_ticker> [event_ticker...]
+python3 -m mentions_engine.cli ingest-kalshi-category <category> [max_pages]
+python3 -m mentions_engine.cli ingest-whitehouse-mention-market-tickers <ticker> [ticker...]
+python3 -m mentions_engine.cli ingest-whitehouse-mention-event-tickers <event_ticker> [event_ticker...]
+python3 -m mentions_engine.cli ingest-whitehouse-mention-category <category> [max_pages]
+python3 -m mentions_engine.cli import-outcomes <outcomes_json_path>
+python3 -m mentions_engine.cli import-kalshi-outcomes <ticker> [ticker...]
+python3 -m mentions_engine.cli map-market <market_id>
+python3 -m mentions_engine.cli estimate-market <market_id>
+python3 -m mentions_engine.cli list-markets open
+python3 -m mentions_engine.cli export-dataset <output_path> [status]
+python3 -m mentions_engine.cli sync-events whitehouse
+python3 -m mentions_engine.cli fetch-sources <event_id>
 python3 -m mentions_engine.cli build-transcript <artifact_id>
 python3 -m mentions_engine.cli compile-rule <rule_json_path> <output_path>
 python3 -m mentions_engine.cli run-rule <event_id> <artifact_id> <transcript_id> <rule_json_path>

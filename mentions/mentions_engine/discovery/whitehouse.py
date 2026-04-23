@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
 from typing import Dict, List, Optional
 from urllib.parse import urljoin
 
+from mentions_engine.discovery.base import DiscoveryResult
 from mentions_engine.http import HttpClient
 from mentions_engine.models import Event, SourceArtifact
 from mentions_engine.utils import slugify, stable_hash
@@ -16,13 +16,6 @@ from mentions_engine.utils import slugify, stable_hash
 WHITE_HOUSE_VIDEO_LIBRARY_URL = (
     "https://www.whitehouse.gov/videos/?query-inherit-playlist_term=press-briefings"
 )
-
-
-@dataclass
-class DiscoveryResult:
-    events: List[Event]
-    artifacts: List[SourceArtifact]
-
 
 class _AnchorParser(HTMLParser):
     def __init__(self) -> None:
@@ -53,10 +46,12 @@ class _AnchorParser(HTMLParser):
 
 
 class WhiteHouseDiscovery:
+    name = "whitehouse"
+
     def __init__(self, client: Optional[HttpClient] = None):
         self.client = client or HttpClient()
 
-    def discover_press_briefings(self) -> DiscoveryResult:
+    def discover_events(self) -> DiscoveryResult:
         html = self.client.get_text(WHITE_HOUSE_VIDEO_LIBRARY_URL)
         links = self._extract_video_links(html)
         events: List[Event] = []
