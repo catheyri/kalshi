@@ -37,6 +37,24 @@ class TranscriptParserTests(unittest.TestCase):
         self.assertEqual(segments[0].speaker_label, "MS. LEAVITT")
         self.assertEqual(segments[1].speaker_label, "Q")
 
+    def test_parse_youtube_captions_srv3_timedtext(self):
+        xml = """
+        <?xml version="1.0" encoding="utf-8" ?>
+        <timedtext format="3">
+          <body>
+            <p t="3320" d="4920"><s>good</s><s t="200"> afternoon</s></p>
+            <p t="8240" d="4200"><s>can</s><s t="640"> you clarify that?</s></p>
+          </body>
+        </timedtext>
+        """
+        transcript, segments = parse_youtube_captions("artifact-yt-srv3", xml)
+        self.assertEqual(transcript.transcript_type, "captions")
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0].start_time_seconds, 3.32)
+        self.assertEqual(segments[0].end_time_seconds, 8.24)
+        self.assertEqual(segments[0].text, "good afternoon")
+        self.assertEqual(segments[1].speaker_label, "Q")
+
     def test_infer_briefing_speaker_label(self):
         self.assertEqual(infer_briefing_speaker_label("Can you clarify that?"), "Q")
         self.assertEqual(infer_briefing_speaker_label("We are here today to discuss tariffs."), "MS. LEAVITT")

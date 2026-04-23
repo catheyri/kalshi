@@ -54,6 +54,6 @@ For the White House vertical, prefer the `ingest-whitehouse-mention-*` commands.
 
 `backfill-whitehouse-official-transcripts` discovers official White House press-briefing transcript pages from the White House sitemap, stores the matching events and transcript artifacts, fetches the raw HTML, and builds normalized transcripts into the local database.
 
-`backfill-whitehouse-briefing-videos` discovers official White House briefing video pages from the White House `past_event` sitemaps, stores the matching events and official video-page artifacts, fetches the raw HTML, and builds transcripts only when the video page exposes a directly linked official transcript page or machine-readable captions.
+`backfill-whitehouse-briefing-videos` discovers official White House briefing video pages from the White House `past_event` sitemaps, stores the matching events and official video-page artifacts, fetches the raw HTML, and builds transcripts when the page exposes a directly linked official transcript page or retrievable embedded caption tracks.
 
 Project config lives in [`pyproject.toml`](pyproject.toml).

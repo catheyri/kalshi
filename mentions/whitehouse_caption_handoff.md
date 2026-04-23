@@ -1,8 +1,8 @@
 # White House Caption Handoff
 
-Last synced code state before the next caption-ingestion pass:
+Last synced code state before the next follow-up pass:
 
-- Git commit: `086b5f2` (`Backfill official White House briefing sources`)
+- Git commit: `259af72` (`Add White House caption handoff note`)
 - Branch pushed: `origin/main`
 - Date verified: `2026-04-23`
 
@@ -16,7 +16,7 @@ What is implemented:
   - Stores official video-page artifacts and fetches raw HTML.
   - Builds transcripts only if the page exposes a directly linked official transcript or machine-readable captions.
 
-Verified live results:
+Verified live results before the embedded-caption implementation:
 
 - `backfill-whitehouse-briefing-videos --start-date 2025-01-20`
   - `discovered_events=64`
@@ -33,6 +33,33 @@ Verified live results:
   - `events_with_transcripts=1`
   - `transcripts_built=1`
 
+Embedded-caption implementation status:
+
+- The official White House video-page backfill now uses:
+  - official White House page HTML for the embedded YouTube video ID
+  - YouTube watch page for `INNERTUBE_API_KEY`
+  - Android `youtubei/v1/player` for caption tracks without the web `exp=xpe` failure mode
+  - timedtext `fmt=srv3` XML as the stored caption artifact
+- The transcript parser now handles both legacy `<text ...>` captions and current timedtext format 3 XML with `<p>` / `<s>` nodes.
+
+Verified live results after the embedded-caption implementation:
+
+- `backfill-whitehouse-briefing-videos --start-date 2025-01-20`
+  - `discovered_events=64`
+  - `discovered_artifacts=64`
+  - `fetched_artifacts=105`
+  - `events_with_text=41`
+  - `transcripts_built=41`
+  - `official_transcripts_built=0`
+  - `caption_transcripts_built=41`
+- Clean-run artifact inventory:
+  - `video_replay=191`
+  - `closed_captions=41`
+  - `official_transcript=3`
+- Clean-run transcript inventory:
+  - `captions=41`
+  - `official=3`
+
 Important findings:
 
 - The official White House site currently exposes many more briefing video pages than standalone transcript pages.
@@ -47,23 +74,19 @@ Important findings:
 
 Known current limitation:
 
-- Official video pages are being inventoried correctly, but the current extractor is not yet pulling usable captions from the embedded player.
-- Earlier manual probing showed embedded YouTube IDs on at least some pages, but the current caption path did not yield stored `closed_captions` artifacts.
+- 23 of the 64 discovered video events still do not yield caption artifacts.
+- At least some later 2025 / 2026 briefings appear to have no retrievable timedtext via the current embedded YouTube path.
 
-Next steps for the caption-ingestion pass:
+Next steps:
 
-1. Inspect several saved `data/raw/whitehouse/*.video.html` pages and extract the embedded player metadata more directly.
-2. Parse the player JSON for:
-   - YouTube video ID
-   - caption track descriptors
-   - any direct caption URLs or timedtext parameters
-3. Add a deterministic extractor for caption track metadata from the official page HTML itself.
-4. Only fetch captions from explicit embedded-track metadata or other directly exposed official player data.
-   - Do not reintroduce loose White House site search.
-5. If YouTube caption retrieval still fails:
-   - determine whether the failure is due to stale client behavior, blocked timedtext variants, or missing installed tooling
-   - prefer an official embedded-caption fetch path before any broader fallback
-6. Re-run:
+1. Audit the 23 missing-caption events and determine whether they fail because:
+   - no caption tracks exist
+   - only PO-token-gated tracks exist
+   - the embedded video differs from the standard path
+2. Store more caption-track metadata on `closed_captions` artifacts if that will help downstream auditing.
+3. Consider whether `closed_captions` artifacts sourced from the official White House embedded player should be marked `is_official=True`.
+4. If needed, add one more fallback for official briefing videos that expose captions through a different official player surface, but do not reintroduce loose White House transcript search.
+5. Re-run:
    - `python3 -m unittest discover -s tests`
    - `python3 -m mentions_engine.cli backfill-whitehouse-briefing-videos --start-date 2025-01-20`
 

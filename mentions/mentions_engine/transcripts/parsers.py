@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import xml.etree.ElementTree as ET
 from html import unescape
 from typing import List, Optional, Tuple
 
@@ -119,6 +120,8 @@ def parse_youtube_captions(
             )
             for item in payload
         ]
+    elif raw_text_stripped.startswith("<?xml") or raw_text_stripped.startswith("<timedtext"):
+        chunks = _parse_youtube_timedtext(raw_text)
     else:
         chunks = re.findall(r'<text start="([^"]+)"(?: dur="([^"]+)")?[^>]*>(.*?)</text>', raw_text, re.DOTALL)
     raw_lines: List[str] = []
@@ -177,6 +180,33 @@ def parse_youtube_captions(
     )
 
     return transcript, segments
+
+
+def _parse_youtube_timedtext(raw_text: str) -> List[Tuple[str, str, str]]:
+    root = ET.fromstring(raw_text.strip())
+    chunks: List[Tuple[str, str, str]] = []
+    for node in root.findall(".//p"):
+        start_ms = node.attrib.get("t")
+        duration_ms = node.attrib.get("d")
+        text = _timedtext_node_text(node)
+        if not start_ms:
+            continue
+        start_seconds = str(float(start_ms) / 1000.0)
+        duration_seconds = str(float(duration_ms) / 1000.0) if duration_ms else ""
+        chunks.append((start_seconds, duration_seconds, text))
+    return chunks
+
+
+def _timedtext_node_text(node: ET.Element) -> str:
+    parts: List[str] = []
+    if node.text:
+        parts.append(node.text)
+    for child in node:
+        if child.text:
+            parts.append(child.text)
+        if child.tail:
+            parts.append(child.tail)
+    return "".join(parts)
 
 
 def infer_briefing_speaker_label(text: str) -> Optional[str]:

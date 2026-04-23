@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from html import unescape
-from typing import List, Optional
+from typing import Dict, List, Optional
 from urllib.parse import urljoin
 
 from mentions_engine.acquisition.base import AcquisitionResult
@@ -11,6 +11,15 @@ from mentions_engine.config import AppPaths
 from mentions_engine.http import HttpClient
 from mentions_engine.models import Event, SourceArtifact
 from mentions_engine.utils import normalize_text, stable_hash, utc_now_iso
+
+
+YOUTUBE_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
+)
+YOUTUBE_ANDROID_USER_AGENT = "com.google.android.youtube/20.10.38"
+YOUTUBE_ANDROID_CONTEXT = {"client": {"clientName": "ANDROID", "clientVersion": "20.10.38"}}
+
 
 class WhiteHouseAcquisition:
     event_type = "white_house_press_briefing"
@@ -130,7 +139,7 @@ class WhiteHouseAcquisition:
         if youtube_id:
             captions = self._fetch_youtube_captions(youtube_id)
             if captions is not None:
-                captions_path = self.paths.raw_dir / "whitehouse" / f"{event_id}.captions.json"
+                captions_path = self.paths.raw_dir / "whitehouse" / f"{event_id}.captions.xml"
                 captions_path.write_text(captions, encoding="utf-8")
                 artifacts.append(
                     SourceArtifact(
@@ -147,10 +156,10 @@ class WhiteHouseAcquisition:
                         end_time=None,
                         duration_seconds=None,
                         checksum=stable_hash(captions),
-                        mime_type="application/json",
+                        mime_type="text/xml",
                         is_official=False,
                         is_settlement_candidate=False,
-                        feed_label="youtube_auto_captions",
+                        feed_label="youtube_caption_track",
                         feed_priority=None,
                         broadcast_scope="official",
                         language="en",
@@ -246,47 +255,49 @@ class WhiteHouseAcquisition:
 
     def _fetch_youtube_captions(self, youtube_id: str) -> Optional[str]:
         try:
-            from youtube_transcript_api import YouTubeTranscriptApi
-
-            api = YouTubeTranscriptApi()
-            transcript = api.fetch(youtube_id, languages=["en", "en-US"])
-            rows = [
-                {
-                    "text": item.text,
-                    "start": item.start,
-                    "duration": item.duration,
-                }
-                for item in transcript
-            ]
-            if rows:
-                return json.dumps(rows, indent=2)
+            watch_html = self.client.get_text(
+                f"https://www.youtube.com/watch?v={youtube_id}",
+                headers={"User-Agent": YOUTUBE_BROWSER_USER_AGENT},
+            )
+            api_key = self._extract_youtube_innertube_api_key(watch_html)
+            player = self.client.post_json(
+                f"https://www.youtube.com/youtubei/v1/player?key={api_key}",
+                payload={"context": YOUTUBE_ANDROID_CONTEXT, "videoId": youtube_id},
+                headers={"User-Agent": YOUTUBE_ANDROID_USER_AGENT},
+            )
+            captions = player.get("captions", {}).get("playerCaptionsTracklistRenderer", {})
+            track = self._select_youtube_caption_track(captions)
+            if track is None or not track.get("baseUrl"):
+                return None
+            return (
+                self.client.get_text(
+                    track["baseUrl"],
+                    headers={"User-Agent": YOUTUBE_ANDROID_USER_AGENT},
+                ).strip()
+                or None
+            )
         except Exception:
             pass
+        return None
 
-        watch_html = self.client.get_text(f"https://www.youtube.com/watch?v={youtube_id}")
-        match = re.search(r"ytInitialPlayerResponse\s*=\s*(\{.+?\});", watch_html)
+    def _extract_youtube_innertube_api_key(self, html: str) -> str:
+        match = re.search(r'"INNERTUBE_API_KEY":\s*"([A-Za-z0-9_-]+)"', html)
         if not match:
-            return None
+            raise ValueError("Could not extract YouTube INNERTUBE_API_KEY")
+        return match.group(1)
 
-        payload = json.loads(match.group(1))
-        tracks = (
-            payload.get("captions", {})
-            .get("playerCaptionsTracklistRenderer", {})
-            .get("captionTracks", [])
-        )
+    def _select_youtube_caption_track(self, captions: Dict) -> Optional[Dict]:
+        tracks = captions.get("captionTracks", []) or []
         if not tracks:
             return None
 
-        preferred = None
-        for track in tracks:
-            if track.get("languageCode") in {"en", "en-US"}:
-                preferred = track
-                break
-        if preferred is None:
-            preferred = tracks[0]
-
-        base_url = preferred.get("baseUrl")
-        if not base_url:
-            return None
-        text = self.client.get_text(base_url + "&fmt=srv3")
-        return text or None
+        preferred_languages = ("en-US", "en")
+        for language_code in preferred_languages:
+            for track in tracks:
+                if track.get("languageCode") == language_code and track.get("kind") != "asr":
+                    return track
+        for language_code in preferred_languages:
+            for track in tracks:
+                if track.get("languageCode") == language_code:
+                    return track
+        return tracks[0]

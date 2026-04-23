@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import http.client
+import json
 import ssl
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -30,6 +31,28 @@ class HttpClient:
 
     def get_text(self, url: str, headers: Optional[Dict[str, str]] = None) -> str:
         request = Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
+        return self._send_text(request)
+
+    def post_json(
+        self,
+        url: str,
+        payload: Dict[str, Any],
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        request = Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "User-Agent": USER_AGENT,
+                "Content-Type": "application/json",
+                **(headers or {}),
+            },
+            method="POST",
+        )
+        return json.loads(self._send_text(request))
+
+    def _send_text(self, request: Request) -> str:
+        url = request.full_url
         for attempt in range(self.max_retries + 1):
             try:
                 with urlopen(
