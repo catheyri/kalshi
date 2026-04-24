@@ -100,6 +100,7 @@ class KalshiPublicClient:
         *,
         category: Optional[str] = None,
         status: Optional[str] = None,
+        series_ticker: Optional[str] = None,
         limit: int = 200,
         cursor: Optional[str] = None,
     ) -> dict:
@@ -108,6 +109,8 @@ class KalshiPublicClient:
             params["category"] = category
         if status:
             params["status"] = status
+        if series_ticker:
+            params["series_ticker"] = series_ticker
         if cursor:
             params["cursor"] = cursor
         return self.get_json("/events", params=params)

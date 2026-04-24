@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 from mentions_engine.kalshi import KalshiPublicClient, normalize_market_payload
 from mentions_engine.market_analysis import WhiteHouseMentionMarketParser
-from mentions_engine.models import Market
+from mentions_engine.models import Event, Market
 from mentions_engine.storage import Database
 
 
@@ -69,24 +69,39 @@ class WhiteHouseMentionMarketReporter:
         now = now or datetime.now(timezone.utc)
         historical_all: list[Market] = []
         live_all: list[Market] = []
+        historical_events: list[WhiteHouseMentionEventSummary] = []
+        live_events: list[WhiteHouseMentionEventSummary] = []
         scanned_historical_windows = 0
         scanned_historical_pages = 0
         scanned_live_pages = 0
 
-        targeted_markets = self._discover_series_markets_for_speaker(speaker_key)
-        if targeted_markets:
+        targeted_event_payloads, scanned_event_pages = self._discover_series_events_for_speaker(
+            speaker_key
+        )
+        targeted_markets, scanned_market_pages = self._discover_series_markets_for_speaker(
+            speaker_key,
+            event_payloads=targeted_event_payloads,
+        )
+        if targeted_event_payloads or targeted_markets:
+            all_event_summaries = _summarize_event_payloads(targeted_event_payloads, targeted_markets)
             historical_all, live_all = self._partition_markets(
                 targeted_markets,
                 now=now,
                 lookback_days=lookback_days,
             )
-            scanned_historical_windows = len(
-                {market.metadata.get("event_ticker") for market in historical_all if market.metadata.get("event_ticker")}
+            historical_events, live_events = self._partition_event_summaries(
+                all_event_summaries,
+                now=now,
+                lookback_days=lookback_days,
             )
-            scanned_historical_pages = len(self._candidate_series_tickers_for_speaker(speaker_key))
-            scanned_live_pages = len(
-                {market.metadata.get("event_ticker") for market in live_all if market.metadata.get("event_ticker")}
+            self._persist_discovered_events(
+                targeted_event_payloads,
+                all_event_summaries,
+                speaker_key=speaker_key,
             )
+            scanned_historical_windows = len(historical_events)
+            scanned_historical_pages = scanned_event_pages
+            scanned_live_pages = scanned_market_pages
         else:
             historical_all, live_all, scanned_historical_windows, scanned_historical_pages, scanned_live_pages = (
                 self._build_report_from_global_scan(
@@ -99,9 +114,9 @@ class WhiteHouseMentionMarketReporter:
                     now=now,
                 )
             )
+            historical_events = _summarize_events(historical_all)
+            live_events = _summarize_events(live_all)
 
-        historical_events = _summarize_events(historical_all)
-        live_events = _summarize_events(live_all)
         historical = historical_all[:history_limit]
         live = live_all
         historical.sort(key=_market_sort_key, reverse=True)
@@ -185,44 +200,81 @@ class WhiteHouseMentionMarketReporter:
             self.db.upsert_market(market)
         return market
 
-    def _discover_series_markets_for_speaker(self, speaker_key: str) -> list[Market]:
-        markets_by_id: dict[str, Market] = {}
+    def _discover_series_events_for_speaker(self, speaker_key: str) -> tuple[list[dict], int]:
+        events_by_ticker: dict[str, dict] = {}
+        scanned_pages = 0
         for series_ticker in self._candidate_series_tickers_for_speaker(speaker_key):
-            event_tickers = self._event_tickers_for_series(series_ticker)
-            for event_ticker in event_tickers:
-                event = self.client.fetch_event(event_ticker, with_nested_markets=True)
-                event_title = event.get("title")
-                event_subtitle = event.get("sub_title")
-                event_category = event.get("category")
-                event_series_ticker = event.get("series_ticker") or series_ticker
-                for payload in event.get("markets", []) or []:
+            cursor = None
+            while True:
+                payload = self.client.fetch_events_page(
+                    limit=200,
+                    cursor=cursor,
+                    series_ticker=series_ticker,
+                )
+                scanned_pages += 1
+                for event in payload.get("events", []) or []:
+                    event_ticker = event.get("event_ticker")
+                    if event_ticker:
+                        events_by_ticker[event_ticker] = event
+                cursor = payload.get("cursor")
+                if not cursor:
+                    break
+        return list(events_by_ticker.values()), scanned_pages
+
+    def _discover_series_markets_for_speaker(
+        self,
+        speaker_key: str,
+        *,
+        event_payloads: Sequence[dict],
+    ) -> tuple[list[Market], int]:
+        markets_by_id: dict[str, Market] = {}
+        event_payloads_by_ticker = {
+            payload.get("event_ticker"): payload
+            for payload in event_payloads
+            if payload.get("event_ticker")
+        }
+        scanned_pages = 0
+        for series_ticker in self._candidate_series_tickers_for_speaker(speaker_key):
+            for page in self._iter_market_pages(series_ticker=series_ticker):
+                scanned_pages += 1
+                for payload in page.get("markets", []) or []:
                     enriched_payload = dict(payload)
-                    if event_title:
-                        enriched_payload.setdefault("event_title", event_title)
-                    if event_subtitle:
-                        enriched_payload.setdefault("event_subtitle", event_subtitle)
-                    if event_category:
-                        enriched_payload.setdefault("event_category", event_category)
-                    if event_series_ticker:
-                        enriched_payload.setdefault("series_ticker", event_series_ticker)
+                    event_payload = event_payloads_by_ticker.get(payload.get("event_ticker"))
+                    if event_payload is not None:
+                        if event_payload.get("title"):
+                            enriched_payload.setdefault("event_title", event_payload.get("title"))
+                        if event_payload.get("sub_title"):
+                            enriched_payload.setdefault("event_subtitle", event_payload.get("sub_title"))
+                        if event_payload.get("category"):
+                            enriched_payload.setdefault("event_category", event_payload.get("category"))
+                        if event_payload.get("series_ticker"):
+                            enriched_payload.setdefault("series_ticker", event_payload.get("series_ticker"))
                     market = self._parse_market(enriched_payload, speaker_key)
                     if market is not None:
                         markets_by_id[market.market_id] = market
-        return list(markets_by_id.values())
+        return list(markets_by_id.values()), scanned_pages
+
+    def _persist_discovered_events(
+        self,
+        event_payloads: Sequence[dict],
+        event_summaries: Sequence[WhiteHouseMentionEventSummary],
+        *,
+        speaker_key: str,
+    ) -> None:
+        if self.db is None:
+            return
+        summaries_by_ticker = {summary.event_ticker: summary for summary in event_summaries}
+        for payload in event_payloads:
+            event = _normalize_whitehouse_kalshi_event(
+                payload,
+                speaker_key=speaker_key,
+                summary=summaries_by_ticker.get(payload.get("event_ticker", "")),
+            )
+            if event is not None:
+                self.db.upsert_event(event)
 
     def _candidate_series_tickers_for_speaker(self, speaker_key: str) -> tuple[str, ...]:
         return self._SPEAKER_SERIES_TICKERS.get(speaker_key, ())
-
-    def _event_tickers_for_series(self, series_ticker: str) -> list[str]:
-        event_tickers: list[str] = []
-        seen: set[str] = set()
-        for page in self._iter_market_pages(series_ticker=series_ticker):
-            for payload in page.get("markets", []) or []:
-                event_ticker = payload.get("event_ticker")
-                if event_ticker and event_ticker not in seen:
-                    seen.add(event_ticker)
-                    event_tickers.append(event_ticker)
-        return event_tickers
 
     def _partition_markets(
         self,
@@ -244,6 +296,28 @@ class WhiteHouseMentionMarketReporter:
             historical.append(market)
         historical.sort(key=_market_sort_key, reverse=True)
         live.sort(key=_market_sort_key, reverse=True)
+        return historical, live
+
+    def _partition_event_summaries(
+        self,
+        event_summaries: Sequence[WhiteHouseMentionEventSummary],
+        *,
+        now: datetime,
+        lookback_days: int,
+    ) -> tuple[list[WhiteHouseMentionEventSummary], list[WhiteHouseMentionEventSummary]]:
+        cutoff = now - timedelta(days=lookback_days)
+        historical: list[WhiteHouseMentionEventSummary] = []
+        live: list[WhiteHouseMentionEventSummary] = []
+        for summary in event_summaries:
+            if _is_live_event_summary(summary, now):
+                live.append(summary)
+                continue
+            latest_close_time = _parse_datetime(summary.latest_close_time)
+            if latest_close_time is not None and latest_close_time < cutoff:
+                continue
+            historical.append(summary)
+        historical.sort(key=_event_summary_sort_key, reverse=True)
+        live.sort(key=_event_summary_sort_key, reverse=True)
         return historical, live
 
     def _iter_market_pages(
@@ -459,9 +533,55 @@ def _summarize_events(markets: Sequence[Market]) -> list[WhiteHouseMentionEventS
             summary.latest_close_time = market.close_time
     return sorted(
         summaries.values(),
-        key=lambda event: (event.latest_close_time or "", event.event_ticker),
+        key=_event_summary_sort_key,
         reverse=True,
     )
+
+
+def _summarize_event_payloads(
+    event_payloads: Sequence[dict],
+    markets: Sequence[Market],
+) -> list[WhiteHouseMentionEventSummary]:
+    summaries: dict[str, WhiteHouseMentionEventSummary] = {}
+    for payload in event_payloads:
+        event_ticker = payload.get("event_ticker")
+        if not event_ticker:
+            continue
+        summaries[event_ticker] = WhiteHouseMentionEventSummary(
+            event_ticker=event_ticker,
+            series_ticker=payload.get("series_ticker"),
+            title=payload.get("title") or event_ticker,
+            subtitle=payload.get("sub_title"),
+            category=payload.get("category"),
+            latest_close_time=_infer_event_reference_time(payload.get("sub_title")),
+            market_count=0,
+            status_counts={},
+        )
+
+    for market in markets:
+        event_ticker = market.metadata.get("event_ticker") or market.event_id
+        if not event_ticker:
+            continue
+        summary = summaries.get(event_ticker)
+        if summary is None:
+            summary = WhiteHouseMentionEventSummary(
+                event_ticker=event_ticker,
+                series_ticker=market.metadata.get("series_ticker") or market.series_id,
+                title=market.metadata.get("event_title") or market.title,
+                subtitle=market.metadata.get("event_subtitle"),
+                category=market.metadata.get("event_category"),
+                latest_close_time=market.close_time,
+                market_count=0,
+                status_counts={},
+            )
+            summaries[event_ticker] = summary
+        summary.market_count += 1
+        status = (market.status or "").lower() or "unknown"
+        summary.status_counts[status] = summary.status_counts.get(status, 0) + 1
+        if (market.close_time or "") > (summary.latest_close_time or ""):
+            summary.latest_close_time = market.close_time
+
+    return sorted(summaries.values(), key=_event_summary_sort_key, reverse=True)
 
 
 def _format_status_counts(status_counts: Dict[str, int]) -> str:
@@ -476,6 +596,13 @@ def _is_live_market(market: Market, now: datetime) -> bool:
     return close_time is not None and close_time >= now
 
 
+def _is_live_event_summary(summary: WhiteHouseMentionEventSummary, now: datetime) -> bool:
+    if any(status in {"active", "open"} for status in summary.status_counts):
+        return True
+    close_time = _parse_datetime(summary.latest_close_time)
+    return close_time is not None and close_time >= now
+
+
 def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
@@ -483,6 +610,23 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _infer_event_reference_time(subtitle: Optional[str]) -> Optional[str]:
+    if not subtitle:
+        return None
+    cleaned = subtitle.strip()
+    for prefix in ("Before ", "On "):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+            break
+    for fmt in ("%b %d, %Y", "%B %d, %Y"):
+        try:
+            parsed = datetime.strptime(cleaned, fmt).replace(tzinfo=timezone.utc)
+            return parsed.isoformat().replace("+00:00", "Z")
+        except ValueError:
+            continue
+    return None
 
 
 def _truncate(value: object, width: int) -> str:
@@ -496,3 +640,85 @@ def _truncate(value: object, width: int) -> str:
 
 def _pad(value: str, width: int) -> str:
     return value.ljust(width)
+
+
+def _normalize_whitehouse_kalshi_event(
+    payload: dict,
+    *,
+    speaker_key: str,
+    summary: Optional[WhiteHouseMentionEventSummary] = None,
+) -> Optional[Event]:
+    event_ticker = payload.get("event_ticker")
+    title = payload.get("title")
+    if not event_ticker or not title:
+        return None
+
+    latest_close_time = None
+    statuses: Dict[str, int] = {}
+    market_count = 0
+    if summary is not None:
+        latest_close_time = summary.latest_close_time
+        statuses = dict(summary.status_counts)
+        market_count = summary.market_count
+    else:
+        markets = payload.get("markets", []) or []
+        close_times = [market.get("close_time") for market in markets if market.get("close_time")]
+        latest_close_time = max(close_times) if close_times else _infer_event_reference_time(
+            payload.get("sub_title")
+        )
+        for market in markets:
+            status = market.get("status")
+            if not status:
+                continue
+            statuses[status] = statuses.get(status, 0) + 1
+        market_count = len(markets)
+
+    metadata = {
+        "provider": "kalshi",
+        "source_family": "whitehouse",
+        "speaker_key": speaker_key,
+        "speaker_name": speaker_key.replace("_", " ").title(),
+        "event_ticker": event_ticker,
+        "series_ticker": payload.get("series_ticker"),
+        "event_subtitle": payload.get("sub_title"),
+        "event_category": payload.get("category"),
+        "kalshi_status": payload.get("status"),
+        "status_counts": statuses,
+        "market_count": market_count,
+    }
+    if latest_close_time is not None:
+        metadata["latest_close_time"] = latest_close_time
+
+    return Event(
+        event_id=event_ticker,
+        event_type="kalshi_whitehouse_mention_event",
+        title=title,
+        category="prediction_market",
+        subcategory="white_house_press_briefing_mentions",
+        scheduled_start_time=payload.get("strike_date"),
+        scheduled_end_time=latest_close_time,
+        actual_start_time=None,
+        actual_end_time=latest_close_time if market_count and _all_markets_closed(statuses) else None,
+        participants=_speaker_name_from_key(speaker_key),
+        broadcast_network="Kalshi",
+        league=None,
+        season=None,
+        venue=None,
+        source_priority="kalshi_event_first",
+        broadcast_priority=None,
+        metadata=metadata,
+    )
+
+
+def _all_markets_closed(status_counts: Dict[str, int]) -> bool:
+    if not status_counts:
+        return False
+    return all(status in {"closed", "settled", "finalized"} for status in status_counts)
+
+
+def _event_summary_sort_key(event: WhiteHouseMentionEventSummary) -> tuple[str, str]:
+    return (event.latest_close_time or "", event.event_ticker)
+
+
+def _speaker_name_from_key(speaker_key: str) -> str:
+    return speaker_key.replace("_", " ").title()

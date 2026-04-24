@@ -18,6 +18,54 @@ class WhiteHouseMentionMarketReportTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
+            def fetch_events_page(
+                self,
+                *,
+                category=None,
+                status=None,
+                series_ticker=None,
+                limit=200,
+                cursor=None,
+            ):
+                self.calls.append(
+                    {
+                        "limit": limit,
+                        "cursor": cursor,
+                        "series_ticker": series_ticker,
+                        "category": category,
+                        "status": status,
+                        "kind": "events",
+                    }
+                )
+                if series_ticker == "KXSECPRESSMENTION":
+                    return {
+                        "cursor": None,
+                        "events": [
+                            {
+                                "event_ticker": "KXSECPRESSMENTION-26APR24",
+                                "series_ticker": "KXSECPRESSMENTION",
+                                "title": "What will Karoline Leavitt say in the next press briefing?",
+                                "sub_title": "Before Apr 24, 2026",
+                                "category": "Mentions",
+                            },
+                            {
+                                "event_ticker": "KXSECPRESSMENTION-26APR22",
+                                "series_ticker": "KXSECPRESSMENTION",
+                                "title": "What will Karoline Leavitt say in the next press briefing?",
+                                "sub_title": "Before Apr 22, 2026",
+                                "category": "Mentions",
+                            },
+                            {
+                                "event_ticker": "KXSECPRESSMENTION-26APR20",
+                                "series_ticker": "KXSECPRESSMENTION",
+                                "title": "What will Karoline Leavitt say in the next press briefing?",
+                                "sub_title": "Before Apr 20, 2026",
+                                "category": "Mentions",
+                            },
+                        ],
+                    }
+                return {"cursor": None, "events": []}
+
             def fetch_markets_page(
                 self,
                 *,
@@ -38,6 +86,7 @@ class WhiteHouseMentionMarketReportTests(unittest.TestCase):
                         "min_close_ts": min_close_ts,
                         "max_close_ts": max_close_ts,
                         "status": status,
+                        "kind": "markets",
                     }
                 )
                 if series_ticker == "KXSECPRESSMENTION":
@@ -58,7 +107,7 @@ class WhiteHouseMentionMarketReportTests(unittest.TestCase):
                                 "result": "yes",
                             },
                             {
-                                "ticker": "OTHER-1",
+                                "ticker": "WH-OPEN-1",
                                 "event_ticker": "KXSECPRESSMENTION-26APR24",
                                 "title": "Will the White House Press Secretary say tariffs at her next press briefing?",
                                 "yes_sub_title": "tariffs",
@@ -72,54 +121,6 @@ class WhiteHouseMentionMarketReportTests(unittest.TestCase):
                         ],
                     }
                 return {"cursor": None, "markets": []}
-
-            def fetch_event(self, event_ticker, *, with_nested_markets=False):
-                if event_ticker == "KXSECPRESSMENTION-26APR22":
-                    return {
-                        "event_ticker": event_ticker,
-                        "series_ticker": "KXSECPRESSMENTION",
-                        "title": "What will Karoline Leavitt say in the next press briefing?",
-                        "sub_title": "Before Apr 22, 2026",
-                        "category": "Mentions",
-                        "markets": [
-                            {
-                                "ticker": "WH-1",
-                                "event_ticker": event_ticker,
-                                "title": "Will the White House Press Secretary say border crisis at her next press briefing?",
-                                "yes_sub_title": "border crisis",
-                                "status": "finalized",
-                                "close_time": "2026-04-22T18:00:00Z",
-                                "rules_primary": "Resolves YES if the White House Press Secretary says the phrase border crisis at her next press briefing.",
-                                "yes_bid_dollars": "0.44",
-                                "yes_ask_dollars": "0.49",
-                                "volume_fp": "120",
-                                "result": "yes",
-                            }
-                        ],
-                    }
-                if event_ticker == "KXSECPRESSMENTION-26APR24":
-                    return {
-                        "event_ticker": event_ticker,
-                        "series_ticker": "KXSECPRESSMENTION",
-                        "title": "What will Karoline Leavitt say in the next press briefing?",
-                        "sub_title": "Before Apr 24, 2026",
-                        "category": "Mentions",
-                        "markets": [
-                            {
-                                "ticker": "WH-OPEN-1",
-                                "event_ticker": event_ticker,
-                                "title": "Will the White House Press Secretary say tariffs at her next press briefing?",
-                                "yes_sub_title": "tariffs",
-                                "status": "active",
-                                "close_time": "2026-04-24T18:00:00Z",
-                                "rules_primary": "Resolves YES if the White House Press Secretary says the phrase tariffs at her next press briefing.",
-                                "yes_bid_dollars": "0.35",
-                                "yes_ask_dollars": "0.41",
-                                "volume_fp": "75",
-                            }
-                        ],
-                    }
-                return {"event_ticker": event_ticker, "markets": []}
 
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = AppPaths.from_root(Path(tmpdir))
@@ -143,7 +144,22 @@ class WhiteHouseMentionMarketReportTests(unittest.TestCase):
             self.assertEqual(len(report.live_markets), 1)
             self.assertEqual(report.live_markets[0].market_id, "WH-OPEN-1")
             self.assertEqual(report.live_markets[0].metadata["briefing_scope"], "next_briefing")
+            self.assertEqual(len(report.historical_events), 2)
+            self.assertEqual(report.historical_events[1].event_ticker, "KXSECPRESSMENTION-26APR20")
+            self.assertEqual(report.historical_events[1].market_count, 0)
             self.assertEqual(len(db.list_markets()), 2)
+            with db.connect() as conn:
+                stored_events = conn.execute(
+                    """
+                    select event_id, event_type, title
+                    from events
+                    where event_id in ('KXSECPRESSMENTION-26APR20', 'KXSECPRESSMENTION-26APR22', 'KXSECPRESSMENTION-26APR24')
+                    order by event_id
+                    """
+                ).fetchall()
+            self.assertEqual(len(stored_events), 3)
+            self.assertEqual(stored_events[0]["event_type"], "kalshi_whitehouse_mention_event")
+            self.assertIn("Karoline Leavitt", stored_events[0]["title"])
 
             rendered = render_whitehouse_mention_market_report(report)
             self.assertIn("Karoline Leavitt White House mention markets", rendered)
@@ -152,6 +168,8 @@ class WhiteHouseMentionMarketReportTests(unittest.TestCase):
             event_rendered = render_whitehouse_mention_event_report(report)
             self.assertIn("Karoline Leavitt White House mention events", event_rendered)
             self.assertIn("KXSECPRESSMENTION-26APR22", event_rendered)
+            self.assertIn("KXSECPRESSMENTION-26APR20", event_rendered)
+            self.assertIn("0", event_rendered)
             self.assertIn("active:1", event_rendered)
             self.assertTrue(any(call["series_ticker"] == "KXSECPRESSMENTION" for call in reporter.client.calls))
 

@@ -1,100 +1,57 @@
-# White House Caption Handoff
+# Kalshi White House Mentions Handoff
 
-Last synced code state before the next follow-up pass:
+Date verified: `2026-04-23`
 
-- Git commit: `259af72` (`Add White House caption handoff note`)
-- Branch pushed: `origin/main`
-- Date verified: `2026-04-23`
+Current state:
 
-What is implemented:
+- White House briefing transcript ingestion is already in place and populated in the real datastore.
+- Kalshi White House mention child markets are already stored in the real datastore.
+- Kalshi parent-event persistence was corrected so parent events are now discovered from `/events?series_ticker=KXSECPRESSMENTION` instead of only inferring them from `/markets`.
+- The real DB now contains:
+  - `59` `kalshi_whitehouse_mention_event` rows
+  - `281` White House mention child-market rows
+  - `9` parent events with `market_count > 0`
+  - `50` parent events with `market_count = 0`
 
-- `python3 -m mentions_engine.cli backfill-whitehouse-official-transcripts --start-date 2025-01-20`
-  - Discovers standalone official transcript pages from White House post sitemaps.
-  - Fetches transcript HTML and builds normalized transcripts.
-- `python3 -m mentions_engine.cli backfill-whitehouse-briefing-videos --start-date 2025-01-20`
-  - Discovers official White House briefing video pages from `past_event-sitemap*.xml`.
-  - Stores official video-page artifacts and fetches raw HTML.
-  - Builds transcripts only if the page exposes a directly linked official transcript or machine-readable captions.
+Important finding:
 
-Verified live results before the embedded-caption implementation:
+- The Kalshi public Trade API appears incomplete for older `KXSECPRESSMENTION` events.
+- Example: `KXSECPRESSMENTION-26FEB10`
+  - The browser-visible Kalshi page appears to show child markets.
+  - But the public API currently returns:
+    - `/events/KXSECPRESSMENTION-26FEB10?with_nested_markets=true` -> `markets: []`
+    - `/markets?event_ticker=KXSECPRESSMENTION-26FEB10` -> `[]`
+- This suggests a web-view/API mismatch rather than a local parsing bug.
 
-- `backfill-whitehouse-briefing-videos --start-date 2025-01-20`
-  - `discovered_events=64`
-  - `discovered_artifacts=64`
-  - `fetched_artifacts=64`
-  - `events_with_text=0`
-  - `transcripts_built=0`
-  - `official_transcripts_built=0`
-  - `caption_transcripts_built=0`
-- `backfill-whitehouse-official-transcripts --start-date 2025-01-20`
-  - `discovered_events=1`
-  - `discovered_artifacts=1`
-  - `fetched_artifacts=1`
-  - `events_with_transcripts=1`
-  - `transcripts_built=1`
+What was just changed in code:
 
-Embedded-caption implementation status:
+- `mentions_engine/kalshi.py`
+  - `fetch_events_page()` now supports `series_ticker`.
+- `mentions_engine/whitehouse_markets.py`
+  - parent-event discovery now uses Kalshi `/events`
+  - event persistence now includes parent event shells with `market_count`
+  - event summaries distinguish between market-bearing events and empty shells
+- `tests/test_whitehouse_market_report.py`
+  - updated to cover event discovery from `/events`
+  - updated to cover persisted zero-market parent events
 
-- The official White House video-page backfill now uses:
-  - official White House page HTML for the embedded YouTube video ID
-  - YouTube watch page for `INNERTUBE_API_KEY`
-  - Android `youtubei/v1/player` for caption tracks without the web `exp=xpe` failure mode
-  - timedtext `fmt=srv3` XML as the stored caption artifact
-- The transcript parser now handles both legacy `<text ...>` captions and current timedtext format 3 XML with `<p>` / `<s>` nodes.
+Verification completed:
 
-Verified live results after the embedded-caption implementation:
-
-- `backfill-whitehouse-briefing-videos --start-date 2025-01-20`
-  - `discovered_events=64`
-  - `discovered_artifacts=64`
-  - `fetched_artifacts=105`
-  - `events_with_text=41`
-  - `transcripts_built=41`
-  - `official_transcripts_built=0`
-  - `caption_transcripts_built=41`
-- Clean-run artifact inventory:
-  - `video_replay=191`
-  - `closed_captions=41`
-  - `official_transcript=3`
-- Clean-run transcript inventory:
-  - `captions=41`
-  - `official=3`
-
-Important findings:
-
-- The official White House site currently exposes many more briefing video pages than standalone transcript pages.
-- Video pages cannot be allowed to infer transcript pages via loose White House site search.
-  - That path produced false positives, including attaching the Jan. 29, 2025 transcript to unrelated briefing videos.
-  - The search fallback was removed.
-- Event identity now keys off the official White House URL path, not just normalized title text.
-  - This prevents collisions like the two different Apr. 1, 2025 briefing URLs.
-- Discovery and fetched `video_replay` artifacts now share the same `artifact_id` scheme.
-  - This avoids duplicate video artifacts for the same page.
-- `HttpClient` now retries transient transport failures like `RemoteDisconnected`.
-
-Known current limitation:
-
-- 23 of the 64 discovered video events still do not yield caption artifacts.
-- At least some later 2025 / 2026 briefings appear to have no retrievable timedtext via the current embedded YouTube path.
+- `python3 -m unittest discover -s tests` passes.
+- Real DB was refreshed so parent Kalshi events now reflect the corrected count of `59`.
 
 Next steps:
 
-1. Audit the 23 missing-caption events and determine whether they fail because:
-   - no caption tracks exist
-   - only PO-token-gated tracks exist
-   - the embedded video differs from the standard path
-2. Store more caption-track metadata on `closed_captions` artifacts if that will help downstream auditing.
-3. Consider whether `closed_captions` artifacts sourced from the official White House embedded player should be marked `is_official=True`.
-4. If needed, add one more fallback for official briefing videos that expose captions through a different official player surface, but do not reintroduce loose White House transcript search.
-5. Re-run:
-   - `python3 -m unittest discover -s tests`
-   - `python3 -m mentions_engine.cli backfill-whitehouse-briefing-videos --start-date 2025-01-20`
+1. Do not trust the public Trade API alone for older `KXSECPRESSMENTION` history.
+2. Use a real browser-backed session against a known problematic event page such as:
+   - `https://kalshi.com/markets/kxsecpressmention/sec-press-mentions/kxsecpressmention-26feb10`
+3. Inspect the page network traffic and identify how the web app obtains the visible market list.
+   - likely hydrated JSON in page data, or
+   - a non-public/internal JSON endpoint called by the frontend
+4. Prefer capturing that underlying JSON source rather than scraping rendered HTML.
+5. Add a fallback fetch path for “event exists in web UI but Trade API returns no markets”.
+6. Only fall back to HTML scraping if browser-network inspection does not expose a cleaner JSON source.
 
-Relevant files:
+Goal of the next pass:
 
-- `mentions_engine/discovery/whitehouse.py`
-- `mentions_engine/acquisition/whitehouse.py`
-- `mentions_engine/cli.py`
-- `mentions_engine/http.py`
-- `tests/test_whitehouse_discovery.py`
-- `tests/test_whitehouse_acquisition.py`
+- Recover older White House mention child markets that are visible in the Kalshi web UI but absent from the public Trade API.
