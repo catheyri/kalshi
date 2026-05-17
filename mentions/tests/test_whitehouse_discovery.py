@@ -1,6 +1,7 @@
 import unittest
 
 from mentions_engine.discovery.whitehouse import WhiteHouseDiscovery
+from mentions_engine.profiles import SpeakerProfile
 
 
 class WhiteHouseDiscoveryTests(unittest.TestCase):
@@ -44,6 +45,36 @@ class WhiteHouseDiscoveryTests(unittest.TestCase):
         result = discovery.discover_events()
         self.assertEqual(len(result.events), 1)
         self.assertEqual(result.events[0].event_type, "white_house_press_briefing")
+
+    def test_discover_events_accepts_custom_speaker_profile(self):
+        html = """
+        <html>
+          <body>
+            <a href="/videos/press-secretary-harrison-fields-briefs-members-of-the-media-may-2-2026/">
+              Press Secretary Harrison Fields Briefs Members of the Media, May 2, 2026
+            </a>
+            May 2, 2026
+          </body>
+        </html>
+        """
+
+        class StubClient:
+            def get_text(self, url):
+                return html
+
+        speaker = SpeakerProfile(
+            canonical_name="Harrison Fields",
+            key="harrison_fields",
+            aliases=("harrison fields", "press secretary harrison fields"),
+            transcript_labels=("MR. FIELDS",),
+            caption_speaker_markers=(("harrison fields:", "MR. FIELDS"),),
+            discovery_slug_terms=("harrison-fields",),
+        )
+        discovery = WhiteHouseDiscovery(client=StubClient(), speaker_profile=speaker)
+        result = discovery.discover_events()
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].participants, "Harrison Fields")
+        self.assertEqual(result.events[0].metadata["speaker_key"], "harrison_fields")
 
     def test_discover_official_transcript_events_from_sitemap(self):
         sitemap_index = """
@@ -147,6 +178,46 @@ class WhiteHouseDiscoveryTests(unittest.TestCase):
             "whitehouse-videos-press-secretary-karoline-leavitt-briefs-members-of-the-media-jan-28-2025",
         )
         self.assertEqual(result.events[0].actual_start_time, "2025-01-28T18:00:00+00:00")
+
+    def test_discover_official_briefing_video_events_reads_json_ld_published_date(self):
+        sitemap_index = """
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <sitemap>
+            <loc>https://www.whitehouse.gov/past_event-sitemap.xml</loc>
+          </sitemap>
+        </sitemapindex>
+        """
+        past_event_sitemap = """
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+          <url>
+            <loc>https://www.whitehouse.gov/videos/press-secretary-karoline-leavitt-scott-bessent-and-kelly-loeffler-brief-members-of-the-media/</loc>
+            <lastmod>2026-04-15T18:10:40+00:00</lastmod>
+          </url>
+        </urlset>
+        """
+        video_html = """
+        <html>
+          <head>
+            <meta property="og:title" content="Press Secretary Karoline Leavitt, Scott Bessent, and Kelly Loeffler Brief Members of the Media" />
+            <script type="application/ld+json">{"datePublished":"2026-04-15T18:10:40+00:00"}</script>
+          </head>
+        </html>
+        """
+
+        class StubClient:
+            def get_text(self, url):
+                mapping = {
+                    "https://www.whitehouse.gov/sitemap_index.xml": sitemap_index,
+                    "https://www.whitehouse.gov/past_event-sitemap.xml": past_event_sitemap,
+                    "https://www.whitehouse.gov/videos/press-secretary-karoline-leavitt-scott-bessent-and-kelly-loeffler-brief-members-of-the-media/": video_html,
+                }
+                return mapping[url]
+
+        discovery = WhiteHouseDiscovery(client=StubClient())
+        result = discovery.discover_official_briefing_video_events(start_date="2026-04-09")
+        self.assertEqual(len(result.events), 1)
+        self.assertEqual(result.events[0].actual_start_time, "2026-04-15T18:10:40+00:00")
+        self.assertEqual(result.events[0].metadata["published_at"], "2026-04-15T18:10:40+00:00")
 
     def test_discover_official_briefing_video_events_keeps_distinct_urls_with_same_title(self):
         sitemap_index = """

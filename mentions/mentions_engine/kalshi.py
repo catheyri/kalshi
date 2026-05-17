@@ -62,9 +62,38 @@ class KalshiPublicClient:
     def fetch_market(self, ticker: str) -> dict:
         return self.get_json(f"/markets/{ticker}").get("market", {})
 
+    def fetch_historical_market(self, ticker: str) -> dict:
+        return self.get_json(f"/historical/markets/{ticker}").get("market", {})
+
+    def fetch_historical_cutoff(self) -> dict:
+        return self.get_json("/historical/cutoff")
+
     def fetch_event(self, event_ticker: str, *, with_nested_markets: bool = False) -> dict:
         params = {"with_nested_markets": "true"} if with_nested_markets else None
         return self.get_json(f"/events/{event_ticker}", params=params).get("event", {})
+
+    def fetch_historical_markets_page(
+        self,
+        *,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+        event_ticker: Optional[str] = None,
+        series_ticker: Optional[str] = None,
+        tickers: Optional[Iterable[str]] = None,
+        mve_filter: Optional[str] = None,
+    ) -> dict:
+        params: Dict[str, str] = {"limit": str(limit)}
+        if cursor:
+            params["cursor"] = cursor
+        if event_ticker:
+            params["event_ticker"] = event_ticker
+        if series_ticker:
+            params["series_ticker"] = series_ticker
+        if tickers:
+            params["tickers"] = ",".join(tickers)
+        if mve_filter:
+            params["mve_filter"] = mve_filter
+        return self.get_json("/historical/markets", params=params)
 
     def fetch_markets_page(
         self,
@@ -155,6 +184,10 @@ def normalize_market_payload(payload: dict) -> Market:
         "yes_sub_title": payload.get("yes_sub_title"),
         "series_ticker": payload.get("series_ticker"),
         "result": payload.get("result"),
+        "settlement_ts": payload.get("settlement_ts"),
+        "settlement_value_dollars": payload.get("settlement_value_dollars"),
+        "ingestion_source": payload.get("ingestion_source"),
+        "source_endpoint": payload.get("source_endpoint"),
         "event_title": payload.get("event_title"),
         "event_subtitle": payload.get("event_subtitle"),
         "event_category": payload.get("event_category"),
@@ -172,13 +205,13 @@ def normalize_market_payload(payload: dict) -> Market:
         subtitle=subtitle,
         status=payload.get("status"),
         close_time=payload.get("close_time"),
-        settlement_time=payload.get("settlement_time"),
+        settlement_time=payload.get("settlement_time") or payload.get("settlement_ts"),
         yes_bid=parse_price_to_cents(payload.get("yes_bid_dollars")),
         yes_ask=parse_price_to_cents(payload.get("yes_ask_dollars")),
         no_bid=parse_price_to_cents(payload.get("no_bid_dollars")),
         no_ask=parse_price_to_cents(payload.get("no_ask_dollars")),
         volume=parse_intish(payload.get("volume_fp")),
-        open_interest=parse_intish(payload.get("open_interest")),
+        open_interest=parse_intish(payload.get("open_interest") or payload.get("open_interest_fp")),
         rules_text=payload.get("rules_primary"),
         rules_summary_text=payload.get("rules_primary"),
         source_text=payload.get("source_text"),

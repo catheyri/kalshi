@@ -1,23 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
 from datetime import datetime
 from typing import Iterable, Optional, Sequence
 
 from mentions_engine.models import Market
-from mentions_engine.utils import normalize_text, slugify
+from mentions_engine.profiles import (
+    EventSourceProfile,
+    SpeakerProfile,
+    WHITE_HOUSE_PRESS_BRIEFING,
+    default_whitehouse_speaker_profiles,
+)
+from mentions_engine.utils import normalize_text
 
 
-@dataclass(frozen=True)
-class WhiteHouseSpeakerRule:
-    canonical_name: str
-    aliases: tuple[str, ...]
-    target_phrase_patterns: tuple[str, ...] = ()
-
-    @property
-    def speaker_key(self) -> str:
-        return slugify(self.canonical_name).replace("-", "_")
+WhiteHouseSpeakerRule = SpeakerProfile
 
 
 class WhiteHouseMentionMarketParser:
@@ -28,25 +25,15 @@ class WhiteHouseMentionMarketParser:
         r"\b(?:says|mentions|calls|refers to|uses)\s+(?:the phrase\s+)?(.+?)\s+(?:during|in|at)\b",
         r"\bwhat will [^?]+?\s+(?:say|mention|call|refer to)\s+(?:about\s+)?(.+?)\??$",
     )
-    _DEFAULT_SPEAKER_RULES = (
-        WhiteHouseSpeakerRule(
-            canonical_name="Karoline Leavitt",
-            aliases=(
-                "karoline leavitt",
-                "press secretary karoline leavitt",
-                "white house press secretary karoline leavitt",
-                "leavitt",
-            ),
-        ),
-    )
-
     def __init__(
         self,
         speaker_rules: Optional[Sequence[WhiteHouseSpeakerRule]] = None,
         target_phrase_patterns: Optional[Sequence[str]] = None,
+        event_profile: EventSourceProfile = WHITE_HOUSE_PRESS_BRIEFING,
     ):
-        self.speaker_rules = tuple(speaker_rules or self._DEFAULT_SPEAKER_RULES)
+        self.speaker_rules = tuple(speaker_rules or default_whitehouse_speaker_profiles())
         self.target_phrase_patterns = tuple(target_phrase_patterns or self._DEFAULT_TARGET_PHRASE_PATTERNS)
+        self.event_profile = event_profile
 
     def parse(self, market: Market) -> Optional[Market]:
         haystack = " ".join(
@@ -81,9 +68,9 @@ class WhiteHouseMentionMarketParser:
             {
                 "market_family": "mention",
                 "mention_parser": self.name,
-                "source_family": "whitehouse",
-                "event_family": "white_house_press_briefing",
-                "event_type": "white_house_press_briefing",
+                "source_family": self.event_profile.source_family,
+                "event_family": self.event_profile.event_family,
+                "event_type": self.event_profile.event_type,
                 "speaker_name": speaker_rule.canonical_name,
                 "speaker_key": speaker_rule.speaker_key,
                 "participants": speaker_rule.canonical_name,
@@ -110,25 +97,11 @@ class WhiteHouseMentionMarketParser:
     def _looks_like_mention_market(self, normalized_text: str) -> bool:
         has_briefing_context = any(
             phrase in normalized_text
-            for phrase in [
-                "briefing",
-                "press briefing",
-                "white house briefing",
-                "members of the media",
-            ]
+            for phrase in self.event_profile.mention_context_phrases
         )
         has_utterance_context = any(
             phrase in normalized_text
-            for phrase in [
-                "what will",
-                "will ",
-                "say ",
-                "mention ",
-                "utter ",
-                "call ",
-                "refer to ",
-                "use the phrase",
-            ]
+            for phrase in self.event_profile.utterance_context_phrases
         )
         return has_briefing_context and has_utterance_context
 

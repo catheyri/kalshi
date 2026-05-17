@@ -7,6 +7,7 @@ from html import unescape
 from typing import List, Optional, Tuple
 
 from mentions_engine.models import Transcript, TranscriptSegment
+from mentions_engine.profiles import SpeakerProfile, default_whitehouse_speaker_profiles
 from mentions_engine.transcripts.normalize import normalize_text_block
 from mentions_engine.utils import stable_hash, utc_now_iso
 
@@ -25,9 +26,11 @@ def strip_tags(html: str) -> str:
 def parse_official_whitehouse_transcript(
     artifact_id: str,
     html: str,
+    speaker_profiles: Optional[tuple[SpeakerProfile, ...]] = None,
 ) -> Tuple[Transcript, List[TranscriptSegment]]:
     text = strip_tags(html)
-    segments_raw = split_speaker_segments(text)
+    profiles = speaker_profiles or default_whitehouse_speaker_profiles()
+    segments_raw = split_speaker_segments_for_profiles(text, speaker_profiles=profiles)
     normalized = normalize_text_block(text)
 
     transcript = Transcript(
@@ -88,7 +91,32 @@ def parse_official_whitehouse_transcript(
 
 
 def split_speaker_segments(text: str) -> List[Tuple[str, str]]:
-    pattern = re.compile(r"\b(MS\. LEAVITT|Q|THE PRESS|MR\. [A-Z-]+|MS\. [A-Z-]+):", re.IGNORECASE)
+    return split_speaker_segments_for_profiles(
+        text,
+        speaker_profiles=default_whitehouse_speaker_profiles(),
+    )
+
+
+def split_speaker_segments_for_profiles(
+    text: str,
+    *,
+    speaker_profiles: tuple[SpeakerProfile, ...],
+) -> List[Tuple[str, str]]:
+    speaker_labels = sorted(
+        {
+            label
+            for profile in speaker_profiles
+            for label in profile.transcript_labels
+            if label
+        },
+        key=len,
+        reverse=True,
+    )
+    speaker_pattern = "".join(f"{re.escape(label)}|" for label in speaker_labels)
+    pattern = re.compile(
+        rf"\b({speaker_pattern}Q|THE PRESS|THE PRESIDENT|THE VICE PRESIDENT|MR\. [A-Z-]+|MS\. [A-Z-]+):",
+        re.IGNORECASE,
+    )
     matches = list(pattern.finditer(text))
     if not matches:
         return []
@@ -107,7 +135,9 @@ def split_speaker_segments(text: str) -> List[Tuple[str, str]]:
 def parse_youtube_captions(
     artifact_id: str,
     raw_text: str,
+    speaker_profiles: Optional[tuple[SpeakerProfile, ...]] = None,
 ) -> Tuple[Transcript, List[TranscriptSegment]]:
+    profiles = speaker_profiles or default_whitehouse_speaker_profiles()
     raw_text_stripped = raw_text.strip()
     chunks = []
     if raw_text_stripped.startswith("["):
@@ -129,6 +159,8 @@ def parse_youtube_captions(
 
     transcript_id = f"transcript-{stable_hash(artifact_id + ':youtube-captions')[:16]}"
 
+    current_speaker_label: Optional[str] = None
+
     for index, (start_value, duration_value, text_value) in enumerate(chunks):
         text = unescape(re.sub(r"<[^>]+>", " ", text_value))
         text = re.sub(r"\s+", " ", text).strip()
@@ -141,7 +173,13 @@ def parse_youtube_captions(
         if start_seconds is not None and duration_seconds is not None:
             end_seconds = start_seconds + duration_seconds
         normalized = normalize_text_block(text)
-        speaker_label = infer_briefing_speaker_label(text)
+        speaker_label, inference_kind, should_update_turn = infer_briefing_speaker_turn(
+            text,
+            current_speaker_label=current_speaker_label,
+            speaker_profiles=profiles,
+        )
+        if should_update_turn:
+            current_speaker_label = speaker_label
         segments.append(
             TranscriptSegment(
                 segment_id=f"segment-{stable_hash(transcript_id + ':' + str(index))[:16]}",
@@ -157,7 +195,7 @@ def parse_youtube_captions(
                 word_count=len(text.split()),
                 metadata={
                     "source": "youtube_captions",
-                    "speaker_inference": "heuristic" if speaker_label else "none",
+                    "speaker_inference": inference_kind,
                 },
             )
         )
@@ -209,16 +247,25 @@ def _timedtext_node_text(node: ET.Element) -> str:
     return "".join(parts)
 
 
-def infer_briefing_speaker_label(text: str) -> Optional[str]:
+def infer_briefing_speaker_turn(
+    text: str,
+    *,
+    current_speaker_label: Optional[str] = None,
+    speaker_profiles: Optional[tuple[SpeakerProfile, ...]] = None,
+) -> Tuple[Optional[str], str, bool]:
+    profiles = speaker_profiles or default_whitehouse_speaker_profiles()
     clean = text.strip()
     if not clean:
-        return None
+        return None, "none", False
 
     # YouTube auto-captions often prefix speaker turns with >>.
     if clean.startswith(">>"):
         clean = clean[2:].strip()
 
     lower = clean.lower()
+    explicit_speaker = _explicit_briefing_speaker_label(lower, speaker_profiles=profiles)
+    if explicit_speaker is not None:
+        return explicit_speaker, "explicit_marker", True
 
     # A lightweight reporter-question heuristic for transcript-free briefings.
     question_starters = (
@@ -244,6 +291,45 @@ def infer_briefing_speaker_label(text: str) -> Optional[str]:
         or lower.startswith("on")
         or lower.startswith("just")
     ):
-        return "Q"
+        return "Q", "heuristic", False
 
-    return "MS. LEAVITT"
+    if current_speaker_label is not None:
+        return current_speaker_label, "turn_continuation", False
+
+    fallback_label = next((profile.primary_transcript_label for profile in profiles if profile.primary_transcript_label), None)
+    return fallback_label, "heuristic", False
+
+
+def infer_briefing_speaker_label(
+    text: str,
+    *,
+    speaker_profiles: Optional[tuple[SpeakerProfile, ...]] = None,
+) -> Optional[str]:
+    label, _, _ = infer_briefing_speaker_turn(text, speaker_profiles=speaker_profiles)
+    return label
+
+
+def _explicit_briefing_speaker_label(
+    lower_text: str,
+    *,
+    speaker_profiles: tuple[SpeakerProfile, ...],
+) -> Optional[str]:
+    for profile in speaker_profiles:
+        for prefix, speaker_label in profile.caption_speaker_markers:
+            if lower_text.startswith(prefix):
+                return speaker_label
+    speaker_markers = (
+        ("the press:", "Q"),
+        ("reporter:", "Q"),
+        ("q:", "Q"),
+        ("the president:", "THE PRESIDENT"),
+        ("president trump:", "THE PRESIDENT"),
+        ("president donald trump:", "THE PRESIDENT"),
+        ("president donald j. trump:", "THE PRESIDENT"),
+        ("donald trump:", "THE PRESIDENT"),
+        ("mr. trump:", "THE PRESIDENT"),
+    )
+    for prefix, speaker_label in speaker_markers:
+        if lower_text.startswith(prefix):
+            return speaker_label
+    return None

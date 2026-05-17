@@ -55,8 +55,40 @@ class TranscriptParserTests(unittest.TestCase):
         self.assertEqual(segments[0].text, "good afternoon")
         self.assertEqual(segments[1].speaker_label, "Q")
 
+    def test_parse_youtube_captions_carries_explicit_speaker_turns(self):
+        xml = """
+        <transcript>
+          <text start="0.0" dur="1.2">The Press: Karoline, has the President warned Russia</text>
+          <text start="1.2" dur="1.2">or even China not to involve itself?</text>
+          <text start="2.4" dur="1.2">Karoline Leavitt: Not to my knowledge.</text>
+          <text start="3.6" dur="1.2">I would not reveal private conversations.</text>
+        </transcript>
+        """
+        transcript, segments = parse_youtube_captions("artifact-yt-turns", xml)
+        self.assertEqual(transcript.transcript_type, "captions")
+        self.assertEqual([segment.speaker_label for segment in segments], ["Q", "Q", "MS. LEAVITT", "MS. LEAVITT"])
+        self.assertEqual(segments[0].metadata["speaker_inference"], "explicit_marker")
+        self.assertEqual(segments[1].metadata["speaker_inference"], "turn_continuation")
+
+    def test_parse_youtube_captions_carries_president_turns(self):
+        xml = """
+        <transcript>
+          <text start="0.0" dur="1.2">The President: Biden would not do this.</text>
+          <text start="1.2" dur="1.2">It was caused by the previous administration.</text>
+          <text start="2.4" dur="1.2">The Press: Mr. President, can you clarify?</text>
+        </transcript>
+        """
+        transcript, segments = parse_youtube_captions("artifact-president-turns", xml)
+        self.assertEqual(transcript.transcript_type, "captions")
+        self.assertEqual([segment.speaker_label for segment in segments], ["THE PRESIDENT", "THE PRESIDENT", "Q"])
+        self.assertEqual(segments[0].metadata["speaker_inference"], "explicit_marker")
+        self.assertEqual(segments[1].metadata["speaker_inference"], "turn_continuation")
+
     def test_infer_briefing_speaker_label(self):
         self.assertEqual(infer_briefing_speaker_label("Can you clarify that?"), "Q")
+        self.assertEqual(infer_briefing_speaker_label("The Press: Can you clarify that?"), "Q")
+        self.assertEqual(infer_briefing_speaker_label("The President: Biden would not do this."), "THE PRESIDENT")
+        self.assertEqual(infer_briefing_speaker_label("Karoline Leavitt: We can clarify that."), "MS. LEAVITT")
         self.assertEqual(infer_briefing_speaker_label("We are here today to discuss tariffs."), "MS. LEAVITT")
 
 

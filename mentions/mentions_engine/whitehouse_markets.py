@@ -7,6 +7,7 @@ from typing import Dict, Iterable, List, Optional, Sequence
 from mentions_engine.kalshi import KalshiPublicClient, normalize_market_payload
 from mentions_engine.market_analysis import WhiteHouseMentionMarketParser
 from mentions_engine.models import Event, Market
+from mentions_engine.profiles import SpeakerProfile, get_speaker_profile
 from mentions_engine.storage import Database
 
 
@@ -40,10 +41,6 @@ class WhiteHouseMentionEventSummary:
 
 
 class WhiteHouseMentionMarketReporter:
-    _SPEAKER_SERIES_TICKERS: Dict[str, tuple[str, ...]] = {
-        "karoline_leavitt": ("KXSECPRESSMENTION",),
-    }
-
     def __init__(
         self,
         client: KalshiPublicClient,
@@ -52,7 +49,8 @@ class WhiteHouseMentionMarketReporter:
         db: Optional[Database] = None,
     ):
         self.client = client
-        self.parser = parser or WhiteHouseMentionMarketParser()
+        self.parser = parser
+        self._parsers_by_speaker: Dict[str, WhiteHouseMentionMarketParser] = {}
         self.db = db
 
     def build_report(
@@ -193,12 +191,23 @@ class WhiteHouseMentionMarketReporter:
         return historical, live, scanned_historical_windows, scanned_historical_pages, scanned_live_pages
 
     def _parse_market(self, payload: dict, speaker_key: str) -> Optional[Market]:
-        market = self.parser.parse(normalize_market_payload(payload))
+        market = self._parser_for_speaker(speaker_key).parse(normalize_market_payload(payload))
         if market is None or market.metadata.get("speaker_key") != speaker_key:
             return None
         if self.db is not None:
             self.db.upsert_market(market)
         return market
+
+    def _parser_for_speaker(self, speaker_key: str) -> WhiteHouseMentionMarketParser:
+        if self.parser is not None:
+            return self.parser
+        parser = self._parsers_by_speaker.get(speaker_key)
+        if parser is None:
+            parser = WhiteHouseMentionMarketParser(
+                speaker_rules=(_speaker_profile_from_key(speaker_key),)
+            )
+            self._parsers_by_speaker[speaker_key] = parser
+        return parser
 
     def _discover_series_events_for_speaker(self, speaker_key: str) -> tuple[list[dict], int]:
         events_by_ticker: dict[str, dict] = {}
@@ -274,7 +283,7 @@ class WhiteHouseMentionMarketReporter:
                 self.db.upsert_event(event)
 
     def _candidate_series_tickers_for_speaker(self, speaker_key: str) -> tuple[str, ...]:
-        return self._SPEAKER_SERIES_TICKERS.get(speaker_key, ())
+        return _speaker_profile_from_key(speaker_key).market_series_tickers
 
     def _partition_markets(
         self,
@@ -347,10 +356,11 @@ class WhiteHouseMentionMarketReporter:
                 break
 
     def _speaker_name_from_key(self, speaker_key: str) -> str:
-        for rule in self.parser.speaker_rules:
-            if rule.speaker_key == speaker_key:
-                return rule.canonical_name
-        return speaker_key.replace("_", " ").title()
+        if self.parser is not None:
+            for rule in self.parser.speaker_rules:
+                if rule.speaker_key == speaker_key:
+                    return rule.canonical_name
+        return _speaker_name_from_key(speaker_key)
 
 
 def render_whitehouse_mention_market_report(report: WhiteHouseMentionMarketReport) -> str:
@@ -673,11 +683,12 @@ def _normalize_whitehouse_kalshi_event(
             statuses[status] = statuses.get(status, 0) + 1
         market_count = len(markets)
 
+    speaker_profile = _speaker_profile_from_key(speaker_key)
     metadata = {
         "provider": "kalshi",
         "source_family": "whitehouse",
         "speaker_key": speaker_key,
-        "speaker_name": speaker_key.replace("_", " ").title(),
+        "speaker_name": speaker_profile.canonical_name,
         "event_ticker": event_ticker,
         "series_ticker": payload.get("series_ticker"),
         "event_subtitle": payload.get("sub_title"),
@@ -699,7 +710,7 @@ def _normalize_whitehouse_kalshi_event(
         scheduled_end_time=latest_close_time,
         actual_start_time=None,
         actual_end_time=latest_close_time if market_count and _all_markets_closed(statuses) else None,
-        participants=_speaker_name_from_key(speaker_key),
+        participants=speaker_profile.canonical_name,
         broadcast_network="Kalshi",
         league=None,
         season=None,
@@ -721,4 +732,15 @@ def _event_summary_sort_key(event: WhiteHouseMentionEventSummary) -> tuple[str, 
 
 
 def _speaker_name_from_key(speaker_key: str) -> str:
-    return speaker_key.replace("_", " ").title()
+    return _speaker_profile_from_key(speaker_key).canonical_name
+
+
+def _speaker_profile_from_key(speaker_key: str) -> SpeakerProfile:
+    try:
+        return get_speaker_profile(speaker_key)
+    except KeyError:
+        return SpeakerProfile(
+            canonical_name=speaker_key.replace("_", " ").title(),
+            key=speaker_key,
+            aliases=(speaker_key.replace("_", " "),),
+        )

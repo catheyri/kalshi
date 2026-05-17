@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 
+from mentions_engine.analysis import build_word_frequency_dataset
 from mentions_engine.discovery.whitehouse import WhiteHouseDiscovery
 from mentions_engine.config import default_paths
 from mentions_engine.engine import Engine
@@ -17,7 +18,9 @@ from mentions_engine.market_ingest import (
     KalshiEventTickerIngestor,
     KalshiMarketTickerIngestor,
 )
+from mentions_engine.models import Event
 from mentions_engine.outcomes import JsonFileOutcomeImporter, KalshiMarketOutcomeImporter
+from mentions_engine.profiles import get_event_source_profile, get_speaker_profile
 from mentions_engine.registry import (
     acquisition_adapters,
     discovery_adapters,
@@ -48,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
             "record-outcome, import-outcomes, import-kalshi-outcomes, estimate-market, list-markets, "
             "list-whitehouse-mention-markets, backfill-whitehouse-official-transcripts, export-dataset, "
             "backfill-whitehouse-briefing-videos, sync-events, fetch-sources, build-transcript, "
-            "compile-rule, run-rule",
+            "compile-rule, run-rule, build-word-frequencies, ingest-whitehouse-mention-historical-events",
             file=sys.stderr,
         )
         return 1
@@ -114,39 +117,99 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "ingest-whitehouse-mention-market-tickers":
         db.initialize()
-        if not argv:
-            print("ingest-whitehouse-mention-market-tickers requires <ticker> [ticker...]", file=sys.stderr)
-            return 1
+        parser = _build_ingest_whitehouse_mention_market_tickers_parser()
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
         ingestor = KalshiMarketTickerIngestor(
-            argv,
+            args.tickers,
             KalshiPublicClient(),
-            parser=WhiteHouseMentionMarketParser(),
+            parser=_whitehouse_mention_market_parser_for_args(args),
         )
         print(json.dumps(engine.ingest_markets(ingestor), indent=2))
         return 0
 
     if command == "ingest-whitehouse-mention-event-tickers":
         db.initialize()
-        if not argv:
-            print("ingest-whitehouse-mention-event-tickers requires <event_ticker> [event_ticker...]", file=sys.stderr)
-            return 1
+        parser = _build_ingest_whitehouse_mention_event_tickers_parser()
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
         ingestor = KalshiEventTickerIngestor(
-            argv,
+            args.event_tickers,
             KalshiPublicClient(),
-            parser=WhiteHouseMentionMarketParser(),
+            parser=_whitehouse_mention_market_parser_for_args(args),
         )
         print(json.dumps(engine.ingest_markets(ingestor), indent=2))
         return 0
 
+    if command == "ingest-whitehouse-mention-historical-events":
+        db.initialize()
+        parser = _build_ingest_whitehouse_mention_historical_events_parser()
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
+
+        event_tickers = list(args.event_tickers)
+        if not event_tickers:
+            event_tickers = _local_whitehouse_mention_event_tickers(
+                db,
+                missing_only=not args.all_local_events,
+                limit=args.limit,
+            )
+        if not event_tickers:
+            print(
+                json.dumps(
+                    {
+                        "ingestor": "kalshi-historical-whitehouse-mention-events",
+                        "event_tickers": 0,
+                        "markets": 0,
+                        "updated_events": 0,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+
+        ingestor = KalshiEventTickerIngestor(
+            event_tickers,
+            KalshiPublicClient(client=HttpClient(allow_insecure_ssl=args.insecure_ssl)),
+            open_only=False,
+            parser=_whitehouse_mention_market_parser_for_args(args),
+            include_historical=True,
+            historical_only=not args.live_too,
+            historical_pages_per_event=args.historical_pages_per_event,
+        )
+        result = engine.ingest_markets(ingestor)
+        updated_events = _refresh_kalshi_whitehouse_mention_event_counts(db, event_tickers)
+        payload = {
+            "ingestor": "kalshi-historical-whitehouse-mention-events",
+            "event_tickers": len(event_tickers),
+            "markets": result["markets"],
+            "updated_events": updated_events,
+            "speaker_key": args.speaker_key,
+            "event_profile": args.event_profile,
+            "historical_pages_per_event": args.historical_pages_per_event,
+            "event_ticker_sample": event_tickers[:10],
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
     if command == "ingest-whitehouse-mention-category":
         db.initialize()
-        category = argv[0] if argv else "Government"
-        max_pages = int(argv[1]) if len(argv) > 1 else 1
+        parser = _build_ingest_whitehouse_mention_category_parser()
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
         ingestor = KalshiCategoryMarketIngestor(
-            category,
+            args.category,
             KalshiPublicClient(),
-            max_pages=max_pages,
-            parser=WhiteHouseMentionMarketParser(),
+            max_pages=args.max_pages,
+            parser=_whitehouse_mention_market_parser_for_args(args),
         )
         print(json.dumps(engine.ingest_markets(ingestor), indent=2))
         return 0
@@ -288,7 +351,11 @@ def main(argv: list[str] | None = None) -> int:
             return int(exc.code)
 
         client = HttpClient(allow_insecure_ssl=args.insecure_ssl)
-        discovery = WhiteHouseDiscovery(client=client)
+        discovery = WhiteHouseDiscovery(
+            client=client,
+            speaker_profile=get_speaker_profile(args.speaker_key),
+            event_profile=get_event_source_profile(args.event_profile),
+        )
         result = discovery.discover_official_transcript_events(start_date=args.start_date)
         events = result.events[: args.limit] if args.limit is not None else result.events
         artifacts = result.artifacts[: len(events)]
@@ -319,6 +386,8 @@ def main(argv: list[str] | None = None) -> int:
 
         payload = {
             "start_date": args.start_date,
+            "speaker_key": args.speaker_key,
+            "event_profile": args.event_profile,
             "discovered_events": len(discovered_event_ids),
             "discovered_artifacts": len(artifacts),
             "fetched_artifacts": fetched_artifacts,
@@ -338,7 +407,11 @@ def main(argv: list[str] | None = None) -> int:
             return int(exc.code)
 
         client = HttpClient(allow_insecure_ssl=args.insecure_ssl)
-        discovery = WhiteHouseDiscovery(client=client)
+        discovery = WhiteHouseDiscovery(
+            client=client,
+            speaker_profile=get_speaker_profile(args.speaker_key),
+            event_profile=get_event_source_profile(args.event_profile),
+        )
         result = discovery.discover_official_briefing_video_events(start_date=args.start_date)
         events = result.events[: args.limit] if args.limit is not None else result.events
         artifacts = result.artifacts[: len(events)]
@@ -375,6 +448,8 @@ def main(argv: list[str] | None = None) -> int:
 
         payload = {
             "start_date": args.start_date,
+            "speaker_key": args.speaker_key,
+            "event_profile": args.event_profile,
             "discovered_events": len(discovered_event_ids),
             "discovered_artifacts": len(artifacts),
             "fetched_artifacts": fetched_artifacts,
@@ -392,6 +467,33 @@ def main(argv: list[str] | None = None) -> int:
         output_path = None if not argv else Path(argv[0])
         status = argv[1] if len(argv) > 1 else None
         print(json.dumps(engine.export_market_dataset(output_path, status=status), indent=2))
+        return 0
+
+    if command == "build-word-frequencies":
+        db.initialize()
+        parser = _build_word_frequencies_parser()
+        try:
+            args = parser.parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code)
+        json_path = Path(args.json_out) if args.json_out else paths.derived_dir / "features" / "word_frequencies.json"
+        html_path = Path(args.html_out) if args.html_out else paths.derived_dir / "features" / "word_frequency_explorer.html"
+        event_html_path = (
+            Path(args.event_html_out)
+            if args.event_html_out
+            else paths.derived_dir / "features" / "event_word_frequency_explorer.html"
+        )
+        result = build_word_frequency_dataset(
+            db,
+            json_path=json_path,
+            html_path=html_path,
+            event_html_path=event_html_path,
+            speaker_scope=args.speaker_scope,
+            speaker_key=args.speaker_key,
+            event_profile_key=args.event_profile,
+            min_count=args.min_count,
+        )
+        print(json.dumps(result.__dict__, indent=2))
         return 0
 
     if command in {"sync-events", "sync-whitehouse"}:
@@ -482,12 +584,182 @@ def _build_list_whitehouse_mention_markets_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _whitehouse_mention_market_parser_for_args(args: argparse.Namespace) -> WhiteHouseMentionMarketParser:
+    return WhiteHouseMentionMarketParser(
+        speaker_rules=(get_speaker_profile(args.speaker_key),),
+        event_profile=get_event_source_profile(args.event_profile),
+    )
+
+
+def _build_ingest_whitehouse_mention_market_tickers_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m mentions_engine.cli ingest-whitehouse-mention-market-tickers",
+        description="Ingest specific Kalshi White House mention market tickers.",
+    )
+    parser.add_argument("tickers", nargs="+")
+    parser.add_argument("--speaker-key", default="karoline_leavitt")
+    parser.add_argument("--event-profile", default="white_house_press_briefing")
+    return parser
+
+
+def _build_ingest_whitehouse_mention_event_tickers_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m mentions_engine.cli ingest-whitehouse-mention-event-tickers",
+        description="Ingest Kalshi White House mention markets from parent event tickers.",
+    )
+    parser.add_argument("event_tickers", nargs="+")
+    parser.add_argument("--speaker-key", default="karoline_leavitt")
+    parser.add_argument("--event-profile", default="white_house_press_briefing")
+    return parser
+
+
+def _build_ingest_whitehouse_mention_historical_events_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m mentions_engine.cli ingest-whitehouse-mention-historical-events",
+        description="Backfill White House mention child markets from Kalshi's historical market endpoint.",
+    )
+    parser.add_argument("event_tickers", nargs="*")
+    parser.add_argument("--speaker-key", default="karoline_leavitt")
+    parser.add_argument("--event-profile", default="white_house_press_briefing")
+    parser.add_argument(
+        "--all-local-events",
+        action="store_true",
+        help="Scan every locally stored Kalshi White House mention parent event instead of only events with no stored child markets.",
+    )
+    parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--historical-pages-per-event",
+        type=int,
+        help="Maximum historical market pages to request per event ticker.",
+    )
+    parser.add_argument(
+        "--live-too",
+        action="store_true",
+        help="Also read nested markets from the live event endpoint before querying historical markets.",
+    )
+    parser.add_argument("--insecure-ssl", action="store_true")
+    return parser
+
+
+def _build_ingest_whitehouse_mention_category_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m mentions_engine.cli ingest-whitehouse-mention-category",
+        description="Ingest Kalshi White House mention markets from a category scan.",
+    )
+    parser.add_argument("category", nargs="?", default="Government")
+    parser.add_argument("max_pages", nargs="?", type=int, default=1)
+    parser.add_argument("--speaker-key", default="karoline_leavitt")
+    parser.add_argument("--event-profile", default="white_house_press_briefing")
+    return parser
+
+
+def _local_whitehouse_mention_event_tickers(
+    db: Database,
+    *,
+    missing_only: bool,
+    limit: int | None,
+) -> list[str]:
+    sql = """
+        SELECT e.event_id, COUNT(m.market_id) AS stored_markets
+        FROM events e
+        LEFT JOIN markets m ON m.event_id = e.event_id
+        WHERE e.event_type = 'kalshi_whitehouse_mention_event'
+        GROUP BY e.event_id
+    """
+    params: list[object] = []
+    if missing_only:
+        sql += " HAVING COUNT(m.market_id) = 0"
+    sql += """
+        ORDER BY COALESCE(
+            e.scheduled_end_time,
+            json_extract(e.metadata_json, '$.latest_close_time'),
+            e.scheduled_start_time,
+            ''
+        ) DESC, e.event_id DESC
+    """
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    with db.connect() as conn:
+        return [row["event_id"] for row in conn.execute(sql, tuple(params)).fetchall()]
+
+
+def _refresh_kalshi_whitehouse_mention_event_counts(db: Database, event_tickers: list[str]) -> int:
+    updated = 0
+    for event_ticker in event_tickers:
+        event_row = db.get_event(event_ticker)
+        if event_row is None:
+            continue
+        with db.connect() as conn:
+            market_rows = conn.execute(
+                """
+                SELECT status, close_time
+                FROM markets
+                WHERE event_id = ?
+                """,
+                (event_ticker,),
+            ).fetchall()
+        if not market_rows:
+            continue
+
+        status_counts: dict[str, int] = {}
+        latest_close_time = None
+        for row in market_rows:
+            status = (row["status"] or "unknown").lower()
+            status_counts[status] = status_counts.get(status, 0) + 1
+            close_time = row["close_time"]
+            if close_time and (latest_close_time is None or close_time > latest_close_time):
+                latest_close_time = close_time
+
+        metadata = json.loads(event_row["metadata_json"])
+        metadata["market_count"] = len(market_rows)
+        metadata["status_counts"] = status_counts
+        if latest_close_time is not None:
+            metadata["latest_close_time"] = latest_close_time
+
+        db.upsert_event(
+            Event(
+                event_id=event_row["event_id"],
+                event_type=event_row["event_type"],
+                title=event_row["title"],
+                category=event_row["category"],
+                subcategory=event_row["subcategory"],
+                scheduled_start_time=event_row["scheduled_start_time"],
+                scheduled_end_time=latest_close_time or event_row["scheduled_end_time"],
+                actual_start_time=event_row["actual_start_time"],
+                actual_end_time=(
+                    latest_close_time
+                    if latest_close_time is not None and _all_closed_statuses(status_counts)
+                    else event_row["actual_end_time"]
+                ),
+                participants=event_row["participants"],
+                broadcast_network=event_row["broadcast_network"],
+                league=event_row["league"],
+                season=event_row["season"],
+                venue=event_row["venue"],
+                source_priority=event_row["source_priority"],
+                broadcast_priority=event_row["broadcast_priority"],
+                metadata=metadata,
+            )
+        )
+        updated += 1
+    return updated
+
+
+def _all_closed_statuses(status_counts: dict[str, int]) -> bool:
+    return bool(status_counts) and all(
+        status in {"closed", "settled", "finalized"} for status in status_counts
+    )
+
+
 def _build_backfill_whitehouse_official_transcripts_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python3 -m mentions_engine.cli backfill-whitehouse-official-transcripts",
         description="Backfill official White House press briefing transcripts from whitehouse.gov.",
     )
     parser.add_argument("--start-date", default="2025-01-20")
+    parser.add_argument("--speaker-key", default="karoline_leavitt")
+    parser.add_argument("--event-profile", default="white_house_press_briefing")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--insecure-ssl", action="store_true")
     return parser
@@ -499,8 +771,25 @@ def _build_backfill_whitehouse_briefing_videos_parser() -> argparse.ArgumentPars
         description="Backfill official White House briefing video pages and any obtainable transcript text.",
     )
     parser.add_argument("--start-date", default="2025-01-20")
+    parser.add_argument("--speaker-key", default="karoline_leavitt")
+    parser.add_argument("--event-profile", default="white_house_press_briefing")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--insecure-ssl", action="store_true")
+    return parser
+
+
+def _build_word_frequencies_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python3 -m mentions_engine.cli build-word-frequencies",
+        description="Build per-event word-frequency features and a browser explorer.",
+    )
+    parser.add_argument("--speaker-scope", choices=("primary", "all"), default="primary")
+    parser.add_argument("--speaker-key", default="karoline_leavitt")
+    parser.add_argument("--event-profile", default="white_house_press_briefing")
+    parser.add_argument("--min-count", type=int, default=1)
+    parser.add_argument("--json-out")
+    parser.add_argument("--html-out")
+    parser.add_argument("--event-html-out")
     return parser
 
 

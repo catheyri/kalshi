@@ -15,6 +15,7 @@ dependencies = [
 [tool.setuptools]
 packages = [
   "mentions_engine",
+  "mentions_engine.analysis",
   "mentions_engine.models",
   "mentions_engine.storage",
   "mentions_engine.discovery",
@@ -27,4 +28,5 @@ packages = [
   "mentions_engine.event_mapping",
   "mentions_engine.outcomes",
   "mentions_engine.prediction",
+  "mentions_engine.visualization",
 ]

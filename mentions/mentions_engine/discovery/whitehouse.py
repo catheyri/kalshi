@@ -12,6 +12,12 @@ import xml.etree.ElementTree as ET
 from mentions_engine.discovery.base import DiscoveryResult
 from mentions_engine.http import HttpClient
 from mentions_engine.models import Event, SourceArtifact
+from mentions_engine.profiles import (
+    EventSourceProfile,
+    SpeakerProfile,
+    KAROLINE_LEAVITT,
+    WHITE_HOUSE_PRESS_BRIEFING,
+)
 from mentions_engine.utils import normalize_text, slugify, stable_hash
 
 
@@ -54,8 +60,16 @@ class _AnchorParser(HTMLParser):
 class WhiteHouseDiscovery:
     name = "whitehouse"
 
-    def __init__(self, client: Optional[HttpClient] = None):
+    def __init__(
+        self,
+        client: Optional[HttpClient] = None,
+        *,
+        speaker_profile: SpeakerProfile = KAROLINE_LEAVITT,
+        event_profile: EventSourceProfile = WHITE_HOUSE_PRESS_BRIEFING,
+    ):
         self.client = client or HttpClient()
+        self.speaker_profile = speaker_profile
+        self.event_profile = event_profile
 
     def discover_events(self) -> DiscoveryResult:
         html = self.client.get_text(WHITE_HOUSE_VIDEO_LIBRARY_URL)
@@ -175,7 +189,7 @@ class WhiteHouseDiscovery:
             title = link["text"]
             if "/videos/" not in href:
                 continue
-            if "press secretary karoline leavitt" not in title.lower():
+            if not self.speaker_profile.matches_text(title):
                 continue
             url = urljoin("https://www.whitehouse.gov", href)
             if url in seen:
@@ -199,29 +213,34 @@ class WhiteHouseDiscovery:
 
     def _build_event(self, url: str, title: str, published_at: Optional[str]) -> Event:
         event_id = _whitehouse_event_id(url)
-        participants = "Karoline Leavitt"
-        metadata = {"source_url": url}
+        participants = self.speaker_profile.canonical_name
+        metadata = {
+            "source_url": url,
+            "speaker_key": self.speaker_profile.speaker_key,
+            "speaker_name": self.speaker_profile.canonical_name,
+            "event_profile_key": self.event_profile.key,
+        }
         if published_at:
             metadata["published_label"] = published_at
             metadata["published_at"] = published_at
 
         return Event(
             event_id=event_id,
-            event_type="white_house_press_briefing",
+            event_type=self.event_profile.event_type,
             title=title,
-            category="government",
-            subcategory="white_house_press_briefing",
+            category=self.event_profile.category,
+            subcategory=self.event_profile.subcategory,
             scheduled_start_time=None,
             scheduled_end_time=None,
             actual_start_time=published_at,
             actual_end_time=None,
             participants=participants,
-            broadcast_network="White House",
+            broadcast_network=self.event_profile.broadcast_network,
             league=None,
             season=None,
-            venue="White House Briefing Room",
-            source_priority="official_transcript_then_official_video_then_third_party_transcript_then_asr",
-            broadcast_priority="official_transcript_first",
+            venue=self.event_profile.venue,
+            source_priority=self.event_profile.source_priority,
+            broadcast_priority=self.event_profile.broadcast_priority,
             metadata=metadata,
         )
 
@@ -288,41 +307,27 @@ class WhiteHouseDiscovery:
 
     def _looks_like_transcript_url(self, url: str) -> bool:
         low = url.lower()
-        if "/briefings-statements/" not in low:
+        if "/briefings-statements/" not in low or not self.speaker_profile.matches_slug(low):
             return False
-        return "press-briefing" in low and "karoline-leavitt" in low
+        return any(pattern in low for pattern in self.event_profile.transcript_url_patterns)
 
     def _looks_like_briefing_video_url(self, url: str) -> bool:
         low = url.lower()
-        if "/videos/" not in low or "karoline-leavitt" not in low:
+        if "/videos/" not in low or not self.speaker_profile.matches_slug(low):
             return False
-        include_patterns = (
-            "briefs-members-of-the-media",
-            "brief-members-of-the-media",
-            "briefs-members-of-the-new-media",
-            "press-briefing-by-press-secretary-karoline-leavitt",
-            "press-briefing-by-the-white-house-press-secretary-karoline-leavitt",
-            "holds-a-press-briefing",
-        )
-        return any(pattern in low for pattern in include_patterns)
+        return any(pattern in low for pattern in self.event_profile.video_url_patterns)
 
     def _looks_like_transcript_title(self, title: str) -> bool:
         normalized = normalize_text(title)
-        return "press briefing" in normalized and "karoline leavitt" in normalized
+        return self.speaker_profile.matches_text(normalized) and any(
+            pattern in normalized for pattern in self.event_profile.transcript_title_patterns
+        )
 
     def _looks_like_briefing_video_title(self, title: str) -> bool:
         normalized = normalize_text(title)
-        if "karoline leavitt" not in normalized:
+        if not self.speaker_profile.matches_text(normalized):
             return False
-        include_patterns = (
-            "briefs members of the media",
-            "brief members of the media",
-            "briefs members of the new media",
-            "press briefing by press secretary karoline leavitt",
-            "press briefing by the white house press secretary karoline leavitt",
-            "holds a press briefing",
-        )
-        return any(pattern in normalized for pattern in include_patterns)
+        return any(pattern in normalized for pattern in self.event_profile.video_title_patterns)
 
     def _extract_page_metadata(self, html: str, url: str) -> Dict[str, Optional[str]]:
         metadata: Dict[str, Optional[str]] = {"url": url}
@@ -337,11 +342,7 @@ class WhiteHouseDiscovery:
                 else url.rstrip("/").rsplit("/", 1)[-1]
             )
 
-        published_match = re.search(r'article:published_time" content="([^"]+)"', html)
-        if published_match:
-            metadata["published_at"] = published_match.group(1)
-        else:
-            metadata["published_at"] = None
+        metadata["published_at"] = _extract_published_at(html)
         return metadata
 
     def _build_transcript_event(
@@ -351,27 +352,33 @@ class WhiteHouseDiscovery:
         published_at: Optional[str],
     ) -> Event:
         event_id = _whitehouse_event_id(url)
-        metadata = {"source_url": url, "transcript_url": url}
+        metadata = {
+            "source_url": url,
+            "transcript_url": url,
+            "speaker_key": self.speaker_profile.speaker_key,
+            "speaker_name": self.speaker_profile.canonical_name,
+            "event_profile_key": self.event_profile.key,
+        }
         if published_at:
             metadata["published_at"] = published_at
 
         return Event(
             event_id=event_id,
-            event_type="white_house_press_briefing",
+            event_type=self.event_profile.event_type,
             title=title,
-            category="government",
-            subcategory="white_house_press_briefing",
+            category=self.event_profile.category,
+            subcategory=self.event_profile.subcategory,
             scheduled_start_time=None,
             scheduled_end_time=None,
             actual_start_time=published_at,
             actual_end_time=None,
-            participants="Karoline Leavitt",
-            broadcast_network="White House",
+            participants=self.speaker_profile.canonical_name,
+            broadcast_network=self.event_profile.broadcast_network,
             league=None,
             season=None,
-            venue="White House Briefing Room",
-            source_priority="official_transcript_then_official_video_then_third_party_transcript_then_asr",
-            broadcast_priority="official_transcript_first",
+            venue=self.event_profile.venue,
+            source_priority=self.event_profile.source_priority,
+            broadcast_priority=self.event_profile.broadcast_priority,
             metadata=metadata,
         )
 
@@ -405,6 +412,20 @@ class WhiteHouseDiscovery:
             language="en",
             metadata={},
         )
+
+
+def _extract_published_at(html: str) -> Optional[str]:
+    patterns = (
+        r'article:published_time" content="([^"]+)"',
+        r'"datePublished"\s*:\s*"([^"]+)"',
+        r'"dateCreated"\s*:\s*"([^"]+)"',
+        r'<time[^>]+datetime="([^"]+)"',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _coerce_date(value: str | date | None) -> Optional[date]:
